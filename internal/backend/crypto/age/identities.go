@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,51 +13,139 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"filippo.io/age/agessh"
+	"filippo.io/age/plugin"
+	"github.com/gopasspw/gopass/internal/backend/crypto/age/identityfile"
 	"github.com/gopasspw/gopass/pkg/appdir"
-	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/gopasspw/gopass/pkg/debug"
 )
 
 var idRecpCacheKey = "identity"
 
+// wrappedIdentity is a struct that allows us to wrap an `age.Identity` (typically
+// a `plugin.Identity` in order to keep track of its corresponding `age.Recipient`
+// and its bech32 encoding, since the `age`  plugin system doesn't provide a way
+// to easily derive a plugin `Recipient` from a given `Identity`.
+// It is very important to instantiate the recipient when instantiating a
+// wrappedIdentity.
+type wrappedIdentity struct {
+	id       age.Identity
+	rec      age.Recipient
+	encoding string
+}
+
+func (w *wrappedIdentity) Recipient() age.Recipient { return w.rec }
+func (w *wrappedIdentity) String() string           { return w.encoding }
+
+// SafeStr is implemented in order to avoid logging potentially sensitive data,
+// since an `age.Identity` typically contains secret key material.
+func (w *wrappedIdentity) SafeStr() string {
+	if len(w.encoding) < 12 {
+		return "(elided)"
+	} else {
+		// we return the first 12 char which are typically "AGE-PLUGIN-x" where
+		// x is the first letter of the plugin name
+		return w.encoding[:12]
+	}
+}
+
+// Unwrap simply delegates the unwrapping process to its wrapped identity.
+func (w *wrappedIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
+	return w.id.Unwrap(stanzas)
+}
+
+// wrappedRecipient is meant to wrap an `age.Recipient`, typically a plugin one,
+// in order to keep track of its corresponding bech32 encoding since plugins don't
+// support deriving a recipient and its encoding from a given identity.
+type wrappedRecipient struct {
+	rec      age.Recipient
+	encoding string
+}
+
+func (w *wrappedRecipient) String() string { return w.encoding }
+
+// Wrap simply delegates the wrapping process to its wrapped recipient.
+func (w *wrappedRecipient) Wrap(fileKey []byte) ([]*age.Stanza, error) {
+	return w.rec.Wrap(fileKey)
+}
+
 // Identities returns all identities, used for decryption.
 func (a *Age) Identities(ctx context.Context) ([]age.Identity, error) {
-	if !ctxutil.HasPasswordCallback(ctx) {
-		debug.Log("no password callback found, redirecting to askPass")
-		ctx = ctxutil.WithPasswordCallback(ctx, func(prompt string, confirm bool) ([]byte, error) {
-			pw, err := a.askPass.Passphrase(prompt, fmt.Sprintf("to read the age keyring from %s", a.identity), confirm)
+	pwcb := a.effectivePwCallback(ctx, fmt.Sprintf("to read the age keyring from %s", a.identity))
+	ppcb := a.effectivePwPurgeCallback()
 
-			return []byte(pw), err
-		})
-		ctx = ctxutil.WithPasswordPurgeCallback(ctx, a.askPass.Remove)
-	}
-
-	debug.Log("reading native identities from %s", a.identity)
-	buf, err := a.decryptFile(ctx, a.identity)
+	debug.V(1).Log("reading native identities from %s", a.identity)
+	buf, err := a.decryptFile(ctx, a.identity, pwcb, ppcb)
 	if err != nil {
 		debug.Log("failed to decrypt existing identities from %s: %s", a.identity, err)
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("failed to decrypt %s: %w", a.identity, err)
 		}
 
 		return nil, nil
 	}
 
-	ids, err := age.ParseIdentities(bytes.NewReader(buf))
+	ids, err := identityfile.Parse(bytes.NewReader(buf), parseIdentity)
 	if err != nil {
 		return nil, err
 	}
 
-	debug.Log("read %d native identities from %s", len(ids), a.identity)
+	debug.V(1).Log("read %d native identities from %s", len(ids), a.identity)
 
 	return ids, nil
 }
 
-// IdentityRecipients returns a slice of recipients dervied from our identities.
+// parseIdentity is mostly like `age` parseIdentity, except that it implements
+// our custom format we use with wrapped identities to store the encoding of
+// both the plugin identity and its corresponding recipient.
+// Custom format: `<age identity>"|"<age recipient>`
+// This custom format allows us to keep track of a given identity's recipient
+// and prevents us from storing secret identity data in our recipient cache.
+func parseIdentity(s string) (age.Identity, error) {
+	switch {
+	case strings.HasPrefix(s, "AGE-PLUGIN-"):
+		// sp will have a length at least 1 and will contain either the full string
+		// or the first part before | and the second part will be in sp[1].
+		sp := strings.Split(s, "|")
+		id, err := plugin.NewIdentity(sp[0], pluginTerminalUI)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse plugin identity: %w", err)
+		}
+		var rec age.Recipient
+		if len(sp) == 2 {
+			rec = &wrappedRecipient{
+				rec:      id.Recipient(),
+				encoding: sp[1],
+			}
+		} else {
+			rec = id.Recipient()
+		}
+
+		return &wrappedIdentity{
+			id:       id,
+			encoding: s,
+			rec:      rec,
+		}, nil
+	case strings.HasPrefix(s, "AGE-SECRET-KEY-PQ-1"):
+		sp := strings.Split(s, "|")
+
+		return age.ParseHybridIdentity(sp[0])
+	case strings.HasPrefix(s, "AGE-SECRET-KEY-1"):
+		sp := strings.Split(s, "|")
+
+		return age.ParseX25519Identity(sp[0])
+	default:
+		return nil, fmt.Errorf("unknown identity type")
+	}
+}
+
+// IdentityRecipients returns a slice of recipients derived from our identities.
 // Since the identity file is encrypted we try to use a cached copy of the recipients
-// dervied from the identities.
+// derived from the identities.
 func (a *Age) IdentityRecipients(ctx context.Context) ([]age.Recipient, error) {
-	if ids := a.cachedIDRecpipients(); len(ids) > 0 {
+	if ids := a.cachedIDRecipients(); len(ids) > 0 {
+		debug.Log("successfully retrieved identities from cache")
+
 		return ids, nil
 	}
 
@@ -71,29 +160,101 @@ func (a *Age) IdentityRecipients(ctx context.Context) ([]age.Recipient, error) {
 
 	var r []age.Recipient
 	for _, id := range ids {
-		if x, ok := id.(*age.X25519Identity); ok {
-			r = append(r, x.Recipient())
+		if rec := IdentityToRecipient(id); rec != nil {
+			r = append(r, rec)
 		}
 	}
+	debug.Log("got %d recipients from %d age identities", len(r), len(ids))
 
-	if err := a.recpCache.Set(idRecpCacheKey, recipientsToBech32(r)); err != nil {
+	if err := a.recpCache.Set(idRecpCacheKey, recipientsToString(r)); err != nil {
 		debug.Log("failed to cache identity recipients: %s", err)
 	}
 
 	return r, nil
 }
 
+// identityToString returns the portable string encoding of a natively
+// serializable age identity. It returns ok=false for types that cannot be
+// round-tripped through a string — notably SSH identities from
+// filippo.io/age/agessh, whose private-key types implement no String() method
+// and therefore format as an unparseable Go struct (e.g. "&{[185 .. 233]}").
+func identityToString(id age.Identity) (string, bool) {
+	switch id := id.(type) {
+	case *age.X25519Identity:
+		return id.String(), true
+	case *age.HybridIdentity:
+		return id.String(), true
+	case *wrappedIdentity:
+		return id.String(), true
+	case *plugin.Identity:
+		// Raw plugin identities are normally wrapped in wrappedIdentity at parse
+		// time, but handle them explicitly so this switch stays aligned with
+		// IdentityToRecipient and an unwrapped one is never silently dropped.
+		return id.String(), true
+	default:
+		return "", false
+	}
+}
+
+func IdentityToRecipient(id age.Identity) age.Recipient {
+	switch id := id.(type) {
+	case *age.X25519Identity:
+		debug.Log("parsed age identity as X25519Identity")
+
+		return id.Recipient()
+	case *age.HybridIdentity:
+		debug.Log("parsed age identity as HybridIdentity")
+
+		return id.Recipient()
+	case *wrappedIdentity:
+		debug.Log("parsed age identity as wrappedIdentity")
+
+		return id.Recipient()
+	case *plugin.Identity:
+		debug.Log("parsed age identity as plugin.Identity")
+
+		return id.Recipient()
+	case *agessh.RSAIdentity:
+		debug.Log("parsed age identity as RSAIdentity")
+
+		return id.Recipient()
+	case *agessh.Ed25519Identity:
+		debug.Log("parsed age identity as Ed25519Identity")
+
+		return id.Recipient()
+	case *agessh.EncryptedSSHIdentity:
+		debug.Log("parsed age identity as encrypted SSHIdentity")
+
+		return id.Recipient()
+	default:
+		debug.Log("unexpected age identity type: %T", id)
+
+		return nil
+	}
+}
+
 // GenerateIdentity creates a new identity.
-func (a *Age) GenerateIdentity(ctx context.Context, _ string, _ string, pw string) error {
+func (a *Age) GenerateIdentity(ctx context.Context, _ string, _ string, pw string) (string, error) {
 	if pw != "" {
-		ctx = ctxutil.WithPasswordCallback(ctx, func(prompt string, confirm bool) ([]byte, error) {
-			return []byte(pw), nil
-		})
+		debug.Log("age GenerateIdentity using provided pw")
+		// Temporarily override the password callback for the duration of this
+		// call so that addIdentity → saveIdentities → encryptFile use the
+		// supplied passphrase instead of prompting via askPass.
+		old := a.pwCallback
+		a.pwCallback = func(_ string, _ bool) ([]byte, error) { return []byte(pw), nil }
+		defer func() { a.pwCallback = old }()
 	}
 
-	_, err := a.addIdentity(ctx)
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		return "", err
+	}
 
-	return err
+	if err := a.addIdentity(ctx, id); err != nil {
+		return "", err
+	}
+
+	return id.Recipient().String(), nil
 }
 
 // ListIdentities lists all identities.
@@ -123,7 +284,7 @@ func (a *Age) FindIdentities(ctx context.Context, keys ...string) ([]string, err
 	matches := make([]string, 0, len(ids))
 OUTER:
 	for _, k := range keys {
-		for _, r := range recipientsToBech32(ids) {
+		for _, r := range recipientsToString(ids) {
 			if r == k {
 				matches = append(matches, k)
 				debug.Log("found matching recipient %s", k)
@@ -139,10 +300,12 @@ OUTER:
 	return matches, nil
 }
 
-func (a *Age) cachedIDRecpipients() []age.Recipient {
+func (a *Age) cachedIDRecipients() []age.Recipient {
 	if a.recpCache.ModTime(idRecpCacheKey).Before(modTime(a.identity)) {
 		debug.Log("identity cache expired")
-		_ = a.recpCache.Remove(idRecpCacheKey)
+		if err := a.recpCache.Remove(idRecpCacheKey); err != nil {
+			debug.Log("error invalidating age id recipient cache: %s", err)
+		}
 
 		return nil
 	}
@@ -154,54 +317,62 @@ func (a *Age) cachedIDRecpipients() []age.Recipient {
 		return nil
 	}
 
-	rs := make([]age.Recipient, 0, len(recps))
-	for _, recp := range recps {
-		r, err := age.ParseX25519Recipient(recp)
-		if err != nil {
-			debug.Log("failed to parse recipient %s: %s", recp, err)
-
-			continue
-		}
-		rs = append(rs, r)
+	rs, err := a.parseRecipients(context.Background(), recps)
+	if err != nil {
+		debug.Log("cachedIDRecipients failed to parse some age recipients: %s", err)
 	}
 
 	return rs
 }
 
-func (a *Age) addIdentity(ctx context.Context) ([]age.Identity, error) {
-	ids, _ := a.Identities(ctx)
-	id, err := age.GenerateX25519Identity()
+func (a *Age) addIdentity(ctx context.Context, id age.Identity) error {
+	// we invalidate our recipient id cache when we add a new identity
+	if err := a.recpCache.Remove(idRecpCacheKey); err != nil {
+		debug.Log("error invalidating age id recipient cache: %s", err)
+	}
+
+	// Read existing identity file as raw text without parsing it.
+	// This avoids re-invoking external age plugins (e.g. age-plugin-yubikey) for
+	// identities already in the file, which would fail if the hardware token is
+	// unavailable or the plugin binary is missing.
+	existing, err := a.loadIdentityFile(ctx)
+	newFile := false
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("failed to read identity file: %w", err)
+		}
+		newFile = true
 	}
 
-	ids = append(ids, id)
-	if err := a.saveIdentities(ctx, identitiesToString(ids), true); err != nil {
-		return nil, err
+	// Append the new identity as a raw line, preserving all existing content.
+	newLine := fmt.Sprintf("%s", id)
+	var lines []string
+	if existing == "" {
+		lines = []string{newLine}
+	} else {
+		lines = append(strings.Split(strings.TrimRight(existing, "\n"), "\n"), newLine)
 	}
 
-	return ids, nil
+	return a.saveIdentities(ctx, lines, newFile)
+}
+
+// loadIdentityFile decrypts and returns the raw text content of the identity file
+// without parsing individual identity lines. This avoids invoking external age
+// plugins (e.g. age-plugin-yubikey) merely to read existing file contents.
+func (a *Age) loadIdentityFile(ctx context.Context) (string, error) {
+	pwcb := a.effectivePwCallback(ctx, fmt.Sprintf("to read the age keyring from %s", a.identity))
+	ppcb := a.effectivePwPurgeCallback()
+
+	buf, err := a.decryptFile(ctx, a.identity, pwcb, ppcb)
+	if err != nil {
+		return "", err
+	}
+
+	return string(buf), nil
 }
 
 func (a *Age) saveIdentities(ctx context.Context, ids []string, newFile bool) error {
-	// only force a password prompt if running interactively
-	// TODO: this doesn't really cut it. the purpose is to avoid a password prompt
-	// from popping up during tests. but no combination of existing flags really
-	// does convey that correctly. I think we need to cleanup and document the
-	// different flags conveyed by ctxutil.
-	//
-	// Note: if running in a test, we don't want to prompt for a password and just fail.
-	// Not perfect but we don't support password-less age, yet.
-	// TODO(#2108): remove this hack
-	if !ctxutil.HasPasswordCallback(ctx) && !ctxutil.IsAlwaysYes(ctx) {
-		debug.Log("no password callback found, redirecting to askPass")
-		ctx = ctxutil.WithPasswordCallback(ctx, func(prompt string, confirm bool) ([]byte, error) {
-			pw, err := a.askPass.Passphrase(prompt, fmt.Sprintf("to save the age keyring to %s", a.identity), confirm)
-
-			return []byte(pw), err
-		})
-		ctx = ctxutil.WithPasswordPurgeCallback(ctx, a.askPass.Remove)
-	}
+	pwcb := a.effectivePwCallback(ctx, fmt.Sprintf("to save the age keyring to %s", a.identity))
 
 	// ensure directory exists.
 	if err := os.MkdirAll(filepath.Dir(a.identity), 0o700); err != nil {
@@ -210,7 +381,7 @@ func (a *Age) saveIdentities(ctx context.Context, ids []string, newFile bool) er
 		return fmt.Errorf("failed to create directory for %s: %w", a.identity, err)
 	}
 
-	if err := a.encryptFile(ctx, a.identity, []byte(strings.Join(ids, "\n")), newFile); err != nil {
+	if err := a.encryptFile(ctx, a.identity, []byte(strings.Join(ids, "\n")), newFile, pwcb); err != nil {
 		return fmt.Errorf("failed to write encrypted identity to %s: %w", a.identity, err)
 	}
 
@@ -220,20 +391,20 @@ func (a *Age) saveIdentities(ctx context.Context, ids []string, newFile bool) er
 }
 
 func (a *Age) getAllIdentities(ctx context.Context) (map[string]age.Identity, error) {
-	debug.Log("checking native identities")
+	debug.V(1).Log("checking native identities")
 	native, err := a.getNativeIdentities(ctx)
 	if err != nil {
 		return nil, err
 	}
-	debug.Log("got %d native identities", len(native))
+	debug.V(1).Log("got %d native identities", len(native))
 
 	if IsOnlyNative(ctx) {
-		debug.Log("returning only native identities")
+		debug.V(1).Log("returning only native identities")
 
 		return native, nil
 	}
 
-	debug.Log("checking ssh identities")
+	debug.V(1).Log("checking ssh identities")
 	ssh, err := a.getSSHIdentities(ctx)
 	if err != nil {
 		if errors.Is(err, ErrNoSSHDir) {
@@ -243,29 +414,25 @@ func (a *Age) getAllIdentities(ctx context.Context) (map[string]age.Identity, er
 		return nil, err
 	}
 
-	debug.Log("got %d ssh identities", len(ssh))
+	debug.V(1).Log("got %d ssh identities", len(ssh))
 
 	// merge both.
-	for k, v := range ssh {
-		native[k] = v
-	}
-	debug.Log("got %d merged identities", len(native))
+	maps.Copy(native, ssh)
+	debug.V(1).Log("got %d merged identities", len(native))
 
 	ps, err := a.getPassageIdentities(ctx)
 	if err != nil {
-		debug.Log("unable to load passage identities: %s", err)
+		debug.V(1).Log("unable to load passage identities: %s", err)
 	}
 
 	// merge
-	for k, v := range ps {
-		native[k] = v
-	}
+	maps.Copy(native, ps)
 
 	return native, nil
 }
 
-func (a *Age) getPassageIdentities(ctx context.Context) (map[string]age.Identity, error) {
-	fn := PassageIdFile()
+func (a *Age) getPassageIdentities(_ context.Context) (map[string]age.Identity, error) {
+	fn := PassageIDFile()
 	fh, err := os.Open(fn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open %s: %w", fn, err)
@@ -282,8 +449,8 @@ func (a *Age) getPassageIdentities(ctx context.Context) (map[string]age.Identity
 	return idMap(ids), nil
 }
 
-// PassageIdFile returns the location of the passage identities file.
-func PassageIdFile() string {
+// PassageIDFile returns the location of the passage identities file.
+func PassageIDFile() string {
 	return filepath.Join(appdir.UserHome(), ".passage", "identities")
 }
 
@@ -299,30 +466,31 @@ func (a *Age) getNativeIdentities(ctx context.Context) (map[string]age.Identity,
 func idMap(ids []age.Identity) map[string]age.Identity {
 	m := make(map[string]age.Identity)
 	for _, id := range ids {
-		if x, ok := id.(*age.X25519Identity); ok {
-			m[x.Recipient().String()] = id
+		switch i := id.(type) {
+		// Identity interface type doesn't implement Recipient, have to break it out like this
+		case *age.X25519Identity:
+			m[i.Recipient().String()] = id
 
 			continue
+		case *age.HybridIdentity:
+			m[i.Recipient().String()] = id
+
+			continue
+		case *wrappedIdentity:
+			m[i.String()] = id
+
+		default:
+			debug.Log("unknown Identity type: %T", id)
 		}
-		debug.Log("unknown Identity type: %T", id)
 	}
 
 	return m
 }
 
-func recipientsToBech32(recps []age.Recipient) []string {
+func recipientsToString(recps []age.Recipient) []string {
 	r := make([]string, 0, len(recps))
 	for _, recp := range recps {
 		r = append(r, fmt.Sprintf("%s", recp))
-	}
-
-	return r
-}
-
-func identitiesToString(ids []age.Identity) []string {
-	r := make([]string, 0, len(ids))
-	for _, id := range ids {
-		r = append(r, fmt.Sprintf("%s", id))
 	}
 
 	return r

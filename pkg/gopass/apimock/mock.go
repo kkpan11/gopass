@@ -1,3 +1,12 @@
+// Package apimock provides a mock implementation of the gopass API.
+// This is useful for testing purposes and allows to simulate different
+// scenarios without relying on a real backend.
+//
+// # Stability
+//
+// This package is a testing helper with no stability guarantee. Its exported
+// symbols may change without a deprecation window. Consumers outside the
+// gopass module should vendor or copy the parts they need.
 package apimock
 
 import (
@@ -27,28 +36,35 @@ type MockAPI struct {
 }
 
 // New creates a new gopass API mock.
+// It uses an in-memory store.
 func New() *MockAPI {
 	return &MockAPI{
 		store: mockstore.New(""),
 	}
 }
 
-// String returns mockapi.
+// String returns the name of the mock API.
 func (a *MockAPI) String() string {
 	return "mockapi"
 }
 
-// List does nothing.
+// List returns a list of all secrets in the mock store.
 func (a *MockAPI) List(ctx context.Context) ([]string, error) {
 	return a.store.List(ctx, "") //nolint:wrapcheck
 }
 
-// Get does nothing.
+// AuditList returns a list of all secrets in the mock store.
+// Filtering is not implemented in the mock store, so this is equivalent to List.
+func (a *MockAPI) AuditList(ctx context.Context) ([]string, error) {
+	return a.store.List(ctx, "") //nolint:wrapcheck
+}
+
+// Get returns a secret from the mock store.
 func (a *MockAPI) Get(ctx context.Context, name, _ string) (gopass.Secret, error) {
 	return a.store.Get(ctx, name) //nolint:wrapcheck
 }
 
-// Revisions does nothing.
+// Revisions returns a list of all revisions of a secret in the mock store.
 func (a *MockAPI) Revisions(ctx context.Context, name string) ([]string, error) {
 	rs, err := a.store.ListRevisions(ctx, name)
 	if err != nil {
@@ -63,22 +79,22 @@ func (a *MockAPI) Revisions(ctx context.Context, name string) ([]string, error) 
 	return revs, nil
 }
 
-// Set does nothing.
+// Set sets a secret in the mock store.
 func (a *MockAPI) Set(ctx context.Context, name string, sec gopass.Byter) error {
 	return a.store.Set(ctx, name, sec) //nolint:wrapcheck
 }
 
-// Remove does nothing.
+// Remove removes a secret from the mock store.
 func (a *MockAPI) Remove(ctx context.Context, name string) error {
 	return a.store.Delete(ctx, name) //nolint:wrapcheck
 }
 
-// RemoveAll does nothing.
+// RemoveAll removes all secrets with a given prefix from the mock store.
 func (a *MockAPI) RemoveAll(ctx context.Context, prefix string) error {
 	return a.store.Prune(ctx, prefix) //nolint:wrapcheck
 }
 
-// Rename does nothing.
+// Rename moves a secret in the mock store.
 func (a *MockAPI) Rename(ctx context.Context, src, dest string) error {
 	return a.store.Move(ctx, src, dest) //nolint:wrapcheck
 }

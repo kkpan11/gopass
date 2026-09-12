@@ -4,9 +4,13 @@
 
 While [Vault](https://www.vaultproject.io/) is for machines, gopass is for humans [#7](https://github.com/gopasspw/gopass/issues/7)
 
+## Is gopass compatible with pass?
+
+Yes, gopass is a drop-in replacement for pass. It has a similar command structure and is compatible with the pass storage format. However, gopass offers additional features like multiple stores, mounts, and structured secrets, while pass has a more flexible plugin system.
+
 ## `gopass show secret` displays `Error: Failed to decrypt`
 
-This issue may happen if your GPG setup is broken. On MacOS try `brew link --overwrite gnupg`. You also may need to set `export GPG_TTY=$(tty)` in your `.bashrc` [#208](https://github.com/gopasspw/gopass/issues/208), [#209](https://github.com/gopasspw/gopass/issues/209)
+This issue may happen if your GPG setup is broken. On macOS try `brew link --overwrite gnupg`. You also may need to set `export GPG_TTY=$(tty)` in your `.bashrc` [#208](https://github.com/gopasspw/gopass/issues/208), [#209](https://github.com/gopasspw/gopass/issues/209)
 
 ## `gopass recipients add` fails with `Warning: No matching valid key found`
 
@@ -14,7 +18,7 @@ If the key you're trying to add is already in your keyring you may need to trust
 
 ## How can gopass handle binary data?
 
-gopass is designed not to change the content of the secrets in any way except that it will add a final newline at the end of the secret if it does not have one already and the output is going to a terminal. This means that the output may mess up your terminal if it's not only text. In this case you should either encode the secret to text (e.g. base64) before inserting or use the special `gopass binary` sub-command that does that for you.
+gopass is designed not to change the content of the secrets in any way except that it will add a final newline at the end of the secret if it does not have one already and the output is going to a terminal. This means that the output may mess up your terminal if it's not only text. In this case you should either encode the secret to text (e.g. base64) before inserting or use `gopass cat`, which encodes binary data from stdin and decodes it to stdout. For copying or moving files directly, use `gopass fscopy` or `gopass fsmove`.
 
 ## Why does gopass delete my whole KDE klipper history?
 
@@ -30,7 +34,7 @@ Adding or removing recipients with `gopass recipients add` or `gopass recipients
 
 ## gopass can automatically import missing recipient keys, but can it export them as well?
 
-When adding a recipient with `gopass recipients add`, their public key will automatically be exported to the store `.gpg-keys/<ID>`.
+When adding a recipient with `gopass recipients add`, their public key will automatically be exported to the store `.public-keys/<ID>`.
 
 ## Can gopass be used with Terraform?
 
@@ -40,7 +44,7 @@ Yes, there is a gopass-based [Terraform provider](https://github.com/camptocamp/
 
 Set the `auto-expand-secmem` option in your gpg-agent.conf, if your version of GnuPG supports it.
 
-## I'm getting `Path too long for Unix domain socket` errors, usually on MacOS.
+## I'm getting `Path too long for Unix domain socket` errors, usually on macOS.
 
 This can be fixed by setting `export TMPDIR=/tmp` (or any other suiteable location with a path shorter than 80 characters).
 
@@ -57,12 +61,14 @@ crypto implementation (GPG) and we can not easily work around these.
 
 ## API Stability
 
-gopass is provided as an CLI program, not as a library. While we try to make the packages usable as libraries we make no guarantees whatsoever with respect to the API stability. The gopass version only reflects changes in the CLI commands.
+This repository primarily delivers gopass as a command-line interface (CLI) tool. While the underlying Go packages might be importable, we explicitly state that semantic versioning applies solely to changes in the CLI. We offer no API stability guarantees for the Go packages within this repository, and breaking changes may occur without a major version bump of `gopass` itself.
 
-If you use gopass as a library, be sure to vendor it, and expect breaking changes.
+If you choose to utilize `gopass` packages as libraries, it is strongly recommended to vendor them to mitigate potential integration issues arising from non-backward-compatible updates.
+
+Should specific Go packages within this project prove valuable for independent use, we encourage you to request their extraction into separate repositories. In such dedicated repositories, we will adhere to strict semantic versioning principles, ensuring predictable API stability for those packages.
 
 ## Further Reading
 
-* [GPGTools](https://gpgtools.org/) for MacOS
+* [GPGTools](https://gpgtools.org/) for macOS
 * [GitHub Help on GPG](https://help.github.com/articles/signing-commits-with-gpg/)
 * [Git - the simple guide](http://rogerdudler.github.io/git-guide/)

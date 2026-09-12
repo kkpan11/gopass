@@ -1,3 +1,6 @@
+// Package leaf provides the leaf store implementation for gopass.
+// It implements the gopass.Store interface and provides methods to
+// interact with the password store.
 package leaf
 
 import (
@@ -7,16 +10,28 @@ import (
 	"strings"
 
 	"github.com/gopasspw/gopass/internal/backend"
-	"github.com/gopasspw/gopass/internal/set"
+	"github.com/gopasspw/gopass/internal/config"
+	"github.com/gopasspw/gopass/internal/out"
+	"github.com/gopasspw/gopass/internal/store"
 	"github.com/gopasspw/gopass/pkg/debug"
+	"github.com/gopasspw/gopass/pkg/fsutil"
+	"github.com/gopasspw/gopass/pkg/set"
 )
 
 // Store is a password store.
 type Store struct {
-	alias   string
-	path    string
-	crypto  backend.Crypto
-	storage backend.Storage
+	alias          string
+	path           string
+	crypto         backend.Crypto
+	storage        backend.Storage
+	importCallback store.ImportCallback
+}
+
+// SetImportFunc sets the callback used to ask the user for confirmation before
+// importing a public key into the keyring. If not set, all keys are imported
+// silently (the same default as ctxutil.GetImportFunc).
+func (s *Store) SetImportFunc(fn store.ImportCallback) {
+	s.importCallback = fn
 }
 
 // Init initializes this sub store.
@@ -61,14 +76,14 @@ func New(ctx context.Context, alias, path string) (*Store, error) {
 		return nil, fmt.Errorf("failed to init storage backend: %w", err)
 	}
 
-	debug.Log("Storage for %s => %s initialized as %v", alias, path, s.storage)
+	debug.Log("Storage for %q (%q) initialized as %s", alias, path, s.storage)
 
 	// init crypto backend
 	if err := s.initCryptoBackend(ctx); err != nil {
 		return nil, fmt.Errorf("failed to init crypto backend: %w", err)
 	}
 
-	debug.Log("Crypto for %s => %s initialized as %v", alias, path, s.crypto)
+	debug.Log("Crypto for %q (%q) initialized as %s", alias, path, s.crypto)
 
 	return s, nil
 }
@@ -112,25 +127,22 @@ func (s *Store) idFiles(ctx context.Context) []string {
 		return nil
 	}
 
-	files, err := s.Storage().List(ctx, "")
+	files, err := s.storage.List(ctx, "")
 	if err != nil {
+		debug.Log("failed to list files: %s", err)
+
 		return nil
 	}
 
-	// we need to transform the list of files into a list of id files so we can't use
-	// set.SortedFiltered as it doesn't support transformations
 	idfs := make([]string, 0, len(files))
-
-	for _, f := range files {
-		if strings.HasPrefix(filepath.Base(f), ".") {
+	for _, file := range files {
+		if !strings.HasSuffix(file, s.crypto.IDFile()) {
 			continue
 		}
-
-		idf := s.idFile(ctx, f)
-		debug.Log("checking for if %q has an idf: %q", f, idf)
-		if s.storage.Exists(ctx, idf) {
-			idfs = append(idfs, idf)
+		if filepath.Base(file) != s.crypto.IDFile() {
+			continue
 		}
+		idfs = append(idfs, file)
 	}
 
 	debug.Log("idFiles: %q", idfs)
@@ -154,7 +166,7 @@ func (s *Store) IsDir(ctx context.Context, name string) bool {
 
 // Exists checks the existence of a single entry.
 func (s *Store) Exists(ctx context.Context, name string) bool {
-	return s.storage.Exists(ctx, s.Passfile(name))
+	return s.storage.Exists(ctx, s.passfile(ctx, name))
 }
 
 func (s *Store) useableKeys(ctx context.Context, name string) ([]string, error) {
@@ -163,14 +175,32 @@ func (s *Store) useableKeys(ctx context.Context, name string) ([]string, error) 
 		return nil, fmt.Errorf("failed to get recipients: %w", err)
 	}
 
-	if !IsCheckRecipients(ctx) {
+	kl, err := s.crypto.FindRecipients(ctx, rs.IDs()...)
+	if err != nil {
+		debug.Log("failed to find useableKeys: %s", err)
+
+		return rs.IDs(), err
+	}
+
+	// not ideal, but since this used to be a no-op, let us warn about it when it's triggered for now
+	if len(kl) == 0 {
+		out.Warningf(ctx, "crypto backend had no useable keys for recipients %v. Trying to default to these", rs.IDs())
+
 		return rs.IDs(), nil
 	}
 
-	kl, err := s.crypto.FindRecipients(ctx, rs.IDs()...)
-	if err != nil {
-		return rs.IDs(), err
+	// Warn explicitly about any recipient whose key is expired or otherwise
+	// unusable. Without this check the recipient is silently dropped from the
+	// encryption target list, making newly-written secrets unreadable to them
+	// without any indication that this happened.
+	for _, r := range rs.IDs() {
+		validKeys, err := s.crypto.FindRecipients(ctx, r)
+		if err != nil || len(validKeys) < 1 {
+			out.Warningf(ctx, "Recipient %q has no useable key (key may be expired or untrusted). This secret will NOT be encrypted for %q.", r, r)
+		}
 	}
+
+	debug.Log("useableKeys: %v", kl)
 
 	return kl, nil
 }
@@ -178,6 +208,18 @@ func (s *Store) useableKeys(ctx context.Context, name string) ([]string, error) 
 // Passfile returns the name of gpg file on disk, for the given key/name.
 func (s *Store) Passfile(name string) string {
 	return strings.TrimPrefix(name+"."+s.crypto.Ext(), "/")
+}
+
+// passfile is the context-aware version of Passfile. If core.casefold is
+// enabled in the config, the name is normalized via fsutil.NormalizeSecretName
+// before constructing the path. On case-sensitive platforms
+// NormalizeSecretName is a no-op regardless of the config setting.
+func (s *Store) passfile(ctx context.Context, name string) string {
+	if config.Bool(ctx, "core.casefold") {
+		name = fsutil.NormalizeSecretName(name)
+	}
+
+	return s.Passfile(name)
 }
 
 // String implement fmt.Stringer.

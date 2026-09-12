@@ -6,22 +6,24 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"filippo.io/age"
-	"github.com/gopasspw/gopass/pkg/ctxutil"
+	"github.com/gopasspw/gopass/internal/backend/crypto/age/agent"
+
+	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/pkg/debug"
 )
 
 // Decrypt will attempt to decrypt the given payload.
 func (a *Age) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error) {
-	if !ctxutil.HasPasswordCallback(ctx) {
-		debug.Log("no password callback found, redirecting to askPass")
-		ctx = ctxutil.WithPasswordCallback(ctx, func(prompt string, _ bool) ([]byte, error) {
-			pw, err := a.askPass.Passphrase(prompt, fmt.Sprintf("to load the keyring at %s", a.identity), false)
-
-			return []byte(pw), err
-		})
-		ctx = ctxutil.WithPasswordPurgeCallback(ctx, a.askPass.Remove)
+	if config.Bool(ctx, "age.agent-enabled") {
+		plaintext, err := a.decryptWithAgent(ctx, ciphertext)
+		if err == nil {
+			return plaintext, nil
+		}
+		debug.Log("failed to decrypt with agent: %s", err)
+		debug.Log("falling back to direct decryption")
 	}
 
 	ids, err := a.getAllIds(ctx)
@@ -32,7 +34,53 @@ func (a *Age) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error) {
 	return a.decrypt(ciphertext, ids...)
 }
 
+func (a *Age) decryptWithAgent(ctx context.Context, ciphertext []byte) ([]byte, error) {
+	client := agent.NewClient()
+	plaintext, err := client.Decrypt(ciphertext)
+	if err == nil {
+		return plaintext, nil
+	}
+
+	if !strings.Contains(err.Error(), "agent is locked") &&
+		!strings.Contains(err.Error(), "no identities specified") {
+		debug.Log("failed to decrypt with agent: %s", err)
+
+		return nil, err
+	}
+
+	debug.Log("agent is locked, trying to unlock")
+	// unlock the agent
+	if err := client.Unlock(); err != nil {
+		debug.Log("failed to unlock agent: %s", err)
+	}
+	// get identities
+	ids, err := a.getAllIds(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// send identities to agent
+	sIds, err := a.identitiesToString(ids)
+	if err != nil {
+		return nil, err
+	}
+	if sIds != "" {
+		if err := client.SendIdentities(sIds); err != nil {
+			debug.Log("failed to send identities to agent: %s", err)
+		}
+	}
+	// set timeout
+	if timeout := config.AsInt(config.String(ctx, "age.agent-timeout")); timeout > 0 {
+		if err := client.SetTimeout(timeout); err != nil {
+			debug.Log("failed to set agent timeout: %s", err)
+		}
+	}
+	// retry decryption
+	return client.Decrypt(ciphertext)
+}
+
 func (a *Age) decrypt(ciphertext []byte, ids ...age.Identity) ([]byte, error) {
+	debug.V(1).Log("decrypting with %d ids", len(ids))
+
 	out := &bytes.Buffer{}
 	f := bytes.NewReader(ciphertext)
 	r, err := age.Decrypt(f, ids...)
@@ -43,19 +91,22 @@ func (a *Age) decrypt(ciphertext []byte, ids ...age.Identity) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to write plaintext to buffer: %w", err)
 	}
-	debug.Log("Decrypted %d bytes of ciphertext to %d bytes of plaintext", len(ciphertext), n)
+	debug.V(1).Log("Decrypted %d bytes of ciphertext to %d bytes of plaintext", len(ciphertext), n)
 
 	return out.Bytes(), nil
 }
 
-func (a *Age) decryptFile(ctx context.Context, filename string) ([]byte, error) {
+// decryptFile is used to decrypt a scrypt encrypted age keyring/identity file.
+// pwcb is called to obtain the passphrase; ppcb is invoked on a decrypt failure
+// so cached passwords can be invalidated.
+func (a *Age) decryptFile(_ context.Context, filename string, pwcb func(string, bool) ([]byte, error), ppcb func(string)) ([]byte, error) {
 	ciphertext, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}
-	debug.Log("read %d bytes from %s", len(ciphertext), filename)
+	debug.V(1).Log("read %d bytes from %s", len(ciphertext), filename)
 
-	pw, err := ctxutil.GetPasswordCallback(ctx)(filename, false)
+	pw, err := pwcb(filename, false)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +118,7 @@ func (a *Age) decryptFile(ctx context.Context, filename string) ([]byte, error) 
 
 	plaintext, err := a.decrypt(ciphertext, id)
 	if err != nil {
-		ctxutil.GetPasswordPurgeCallback(ctx)(filename)
+		ppcb(filename)
 	}
 
 	return plaintext, err
@@ -78,10 +129,9 @@ func (a *Age) getAllIds(ctx context.Context) ([]age.Identity, error) {
 	if err != nil {
 		return nil, err
 	}
-	idl := make([]age.Identity, 0, len(ids))
-	for _, id := range ids {
-		idl = append(idl, id)
-	}
 
-	return idl, nil
+	// Go map iteration is randomized, so we need to establish a stable
+	// and user-controllable order before handing the identities to age
+	// (see https://github.com/gopasspw/gopass/issues/3393).
+	return orderedIdentities(ctx, ids), nil
 }

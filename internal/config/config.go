@@ -1,3 +1,6 @@
+// Package config provides a way to manage the configuration of gopass.
+// It handles the loading and saving of configuration files,
+// as well as the management of environment variables.
 package config
 
 import (
@@ -7,8 +10,9 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/gopasspw/gitconfig"
 	"github.com/gopasspw/gopass/pkg/debug"
-	"github.com/gopasspw/gopass/pkg/gitconfig"
+	"github.com/gopasspw/gopass/pkg/fsutil"
 )
 
 const (
@@ -44,12 +48,17 @@ func newGitconfig() *gitconfig.Configs {
 }
 
 var defaults = map[string]string{
-	"core.autopush":      "true",
-	"core.autosync":      "true",
-	"core.cliptimeout":   "45",
-	"core.exportkeys":    "true",
-	"core.notifications": "true",
-	"pwgen.xkcd-lang":    "en",
+	"age.agent-enabled":      "false",
+	"age.agent-timeout":      "0",
+	"core.autopush":          "true",
+	"core.autosync":          "true",
+	"core.casefold":          "false",
+	"core.cliptimeout":       "45",
+	"core.exportkeys":        "true",
+	"core.notifications":     "true",
+	"core.follow-references": "false",
+	"pwgen.xkcd-lang":        "en",
+	"show.fuzzysearch":       "true",
 }
 
 // Config is a gopass config handler.
@@ -116,7 +125,13 @@ func newWithOptions(noWrites bool) *Config {
 		}
 	}
 	// load again, this might add a per-store config from the root store
-	c.root.LoadAll(rootPath)
+	// expand ~ in rootPath before passing to LoadAll since the gitconfig
+	// library does not perform tilde expansion
+	if rootPath != "" {
+		c.root.LoadAll(fsutil.CleanPath(rootPath))
+	} else {
+		c.root.LoadAll("")
+	}
 	c.root.NoWrites = noWrites
 
 	if rootPath := c.root.Get("mounts.path"); rootPath == "" {
@@ -169,6 +184,20 @@ func (c *Config) GetAll(key string) []string {
 	return c.root.GetAll(key)
 }
 
+// GetAllM returns all values for the given key, preferring the mount config over root.
+// If the mount config has no values for the key, it falls back to the root config.
+func (c *Config) GetAllM(mount, key string) []string {
+	if mount != "" && mount != "<root>" {
+		if cfg := c.cfgs[mount]; cfg != nil {
+			if v := cfg.GetAll(key); len(v) > 0 {
+				return v
+			}
+		}
+	}
+
+	return c.root.GetAll(key)
+}
+
 // GetGlobal returns the given key from the root global config.
 // This is typically used to prevent a local config override of sensitive config items, e.g. used for integrity checks.
 func (c *Config) GetGlobal(key string) string {
@@ -177,15 +206,24 @@ func (c *Config) GetGlobal(key string) string {
 
 // GetM returns the given key from the mount or the root config if mount is empty.
 func (c *Config) GetM(mount, key string) string {
+	// env vars always win
+	if sv, found := c.root.GetFrom(key, "env"); found && sv != "" {
+		return sv
+	}
+
 	if mount == "" || mount == "<root>" {
 		return c.root.Get(key)
 	}
 
 	if cfg := c.cfgs[mount]; cfg != nil {
-		return cfg.Get(key)
+		if v := cfg.Get(key); v != "" {
+			return v
+		}
 	}
 
-	return ""
+	// Fall back to the root config (including defaults) so sub-stores inherit
+	// global settings when not explicitly overridden in their local config.
+	return c.root.Get(key)
 }
 
 // Set tries to set the key to the given value.
@@ -230,22 +268,22 @@ func (c *Config) SetEnv(key, value string) error {
 
 // Path returns the root store path.
 func (c *Config) Path() string {
-	return c.Get("mounts.path")
+	return fsutil.CleanPath(c.Get("mounts.path"))
 }
 
 // MountPath returns the mount store path.
 func (c *Config) MountPath(mountPoint string) string {
-	return c.Get(mpk(mountPoint))
+	return fsutil.CleanPath(c.Get(mpk(mountPoint)))
 }
 
 // SetPath is a shortcut to set the root store path.
 func (c *Config) SetPath(path string) error {
-	return c.Set("", "mounts.path", path)
+	return c.Set("", "mounts.path", fsutil.ShrinkPath(path))
 }
 
 // SetMountPath is a shortcut to set a mount to a path.
 func (c *Config) SetMountPath(mount, path string) error {
-	return c.Set("", mpk(mount), path)
+	return c.Set("", mpk(mount), fsutil.ShrinkPath(path))
 }
 
 // mpk for mountPathKey.

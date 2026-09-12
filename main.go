@@ -23,6 +23,7 @@ import (
 	ap "github.com/gopasspw/gopass/internal/action"
 	"github.com/gopasspw/gopass/internal/action/exit"
 	"github.com/gopasspw/gopass/internal/action/pwgen"
+	"github.com/gopasspw/gopass/internal/ageagentlauncher"
 	_ "github.com/gopasspw/gopass/internal/backend/crypto"
 	"github.com/gopasspw/gopass/internal/backend/crypto/gpg"
 	_ "github.com/gopasspw/gopass/internal/backend/storage"
@@ -37,7 +38,7 @@ import (
 	"github.com/gopasspw/gopass/pkg/termio"
 	colorable "github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 const (
@@ -52,7 +53,7 @@ func main() {
 	// Example: https://go.dev/play/p/8214zCX6hVq.
 	defer writeCPUProfile()()
 
-	if err := protect.Pledge("stdio rpath wpath cpath tty proc exec fattr"); err != nil {
+	if err := protect.Pledge("stdio rpath wpath cpath tty proc exec fattr unix"); err != nil {
 		panic(err)
 	}
 
@@ -76,29 +77,53 @@ func main() {
 		}
 	}(ctx)
 
-	cli.ErrWriter = errorWriter{ //nolint:reassign
-		out: colorable.NewColorableStderr(),
-	}
 	sv := getVersion()
-	cli.VersionPrinter = makeVersionPrinter(os.Stdout, sv)
+
+	debug.Log("gopass %s starting. Args: %v", sv.String(), os.Args)
 
 	// run the app
 	q := queue.New(ctx)
 	ctx = queue.WithQueue(ctx, q)
 	ctx, app := setupApp(ctx, sv)
 
-	if err := app.RunContext(ctx, os.Args); err != nil {
-		log.Fatal(err)
-	}
+	runErr := runApp(ctx, app)
 
-	// process all pending queue items
+	// process all pending queue items, even on failure: a command can have written a
+	// secret before erroring, and its commit/push is queued at this point.
 	_ = q.Close(ctx)
 
 	writeMemProfile()
+
+	if runErr != nil {
+		log.Fatal(runErr)
+	}
+
+	debug.Log("gopass %s shutting down ...\n\n", sv.String())
+}
+
+func runApp(ctx context.Context, app *cli.Command) error {
+	// recover from nil pointer panics in urfave/cli during shell completion.
+	if isShellCompletion() {
+		defer func() {
+			recover() //nolint:errcheck
+		}()
+	}
+
+	return app.Run(ctx, os.Args)
+}
+
+func isShellCompletion() bool {
+	for _, arg := range os.Args {
+		if arg == "--generate-shell-completion" {
+			return true
+		}
+	}
+
+	return false
 }
 
 //nolint:wrapcheck
-func setupApp(ctx context.Context, sv semver.Version) (context.Context, *cli.App) {
+func setupApp(ctx context.Context, sv semver.Version) (context.Context, *cli.Command) {
 	// try to read config (if it exists)
 	cfg := config.New()
 
@@ -114,34 +139,51 @@ func setupApp(ctx context.Context, sv semver.Version) (context.Context, *cli.App
 
 	// set some action callbacks
 	if !config.AsBool(cfg.Get("core.autoimport")) {
-		ctx = ctxutil.WithImportFunc(ctx, termio.AskForKeyImport)
+		action.Store.SetImportFunc(termio.AskForKeyImport)
 	}
 
 	ctx = leaf.WithFsckFunc(ctx, termio.AskForConfirmation)
 
-	app := cli.NewApp()
+	app := &cli.Command{}
 
 	app.Name = name
 	app.Version = sv.String()
 	app.Usage = "The standard unix password manager - rewritten in Go"
 	app.UseShortOptionHandling = true
-	app.EnableBashCompletion = true
-	app.BashComplete = func(c *cli.Context) {
-		cli.DefaultAppComplete(c)
-		action.Complete(c)
+	app.EnableShellCompletion = true
+	app.ShellComplete = func(ctx context.Context, cmd *cli.Command) {
+		cli.DefaultAppComplete(ctx, cmd)
+		action.Complete(ctx, cmd)
 	}
+	app.ErrWriter = errorWriter{
+		out: colorable.NewColorableStderr(),
+	}
+	app.ExtraInfo = func() map[string]string { return nil }
+	cli.VersionPrinter = makeVersionPrinter(os.Stdout, sv)
 
-	app.Flags = ap.ShowFlags()
-	app.Action = func(c *cli.Context) error {
-		if err := action.IsInitialized(c); err != nil {
+	app.Flags = append(ap.ShowFlags(), &cli.BoolFlag{
+		Name:  "exit-codes",
+		Usage: "Print all exit codes and their meanings, then exit",
+	})
+	app.Before = func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+		if cmd.Bool("exit-codes") {
+			exit.PrintExitCodes(cmd.Root().Writer)
+			os.Exit(exit.OK)
+		}
+
+		return ctx, nil
+	}
+	app.Action = func(ctx context.Context, cmd *cli.Command) error {
+		ctx, err := action.IsInitialized(ctx, cmd)
+		if err != nil {
 			return err
 		}
 
-		if c.Args().Present() {
-			return action.Show(c)
+		if cmd.Args().Present() {
+			return action.Show(ctx, cmd)
 		}
 
-		return action.REPL(c)
+		return action.REPL(ctx, cmd)
 	}
 
 	app.Commands = getCommands(action, app)
@@ -149,49 +191,47 @@ func setupApp(ctx context.Context, sv semver.Version) (context.Context, *cli.App
 	return ctx, app
 }
 
-func getCommands(action *ap.Action, app *cli.App) []*cli.Command {
-	cmds := []*cli.Command{
-		{
-			Name:  "completion",
-			Usage: "Bash and ZSH completion",
-			Description: "" +
-				"Source the output of this command with bash or zsh to get auto completion",
-			Subcommands: []*cli.Command{{
-				Name:   "bash",
-				Usage:  "Source for auto completion in bash",
-				Action: action.CompletionBash,
-			}, {
-				Name:  "zsh",
-				Usage: "Source for auto completion in zsh",
-				Action: func(c *cli.Context) error {
-					return action.CompletionZSH(app) //nolint:wrapcheck
-				},
-			}, {
-				Name:  "fish",
-				Usage: "Source for auto completion in fish",
-				Action: func(c *cli.Context) error {
-					return action.CompletionFish(app) //nolint:wrapcheck
-				},
-			}, {
-				Name:  "openbsdksh",
-				Usage: "Source for auto completion in OpenBSD's ksh",
-				Action: func(c *cli.Context) error {
-					return action.CompletionOpenBSDKsh(app) //nolint:wrapcheck
-				},
-			}},
-		},
-	}
+func getCommands(action *ap.Action, app *cli.Command) []*cli.Command {
+	extra := action.GetCommands()
+	extra2 := pwgen.GetCommands()
+	cmds := make([]*cli.Command, 0, 1+len(extra)+len(extra2))
+	cmds = append(cmds, &cli.Command{
+		Name:  "completion",
+		Usage: "Bash and ZSH completion",
+		Description: "" +
+			"Source the output of this command with bash or zsh to get auto completion",
+		Commands: []*cli.Command{{
+			Name:   "bash",
+			Usage:  "Source for auto completion in bash",
+			Action: action.CompletionBash,
+		}, {
+			Name:  "zsh",
+			Usage: "Source for auto completion in zsh",
+			Action: func(ctx context.Context, cmd *cli.Command) error {
+				return action.CompletionZSH(app) //nolint:wrapcheck
+			},
+		}, {
+			Name:  "fish",
+			Usage: "Source for auto completion in fish",
+			Action: func(ctx context.Context, cmd *cli.Command) error {
+				return action.CompletionFish(app) //nolint:wrapcheck
+			},
+		}, {
+			Name:  "openbsdksh",
+			Usage: "Source for auto completion in OpenBSD's ksh",
+			Action: func(ctx context.Context, cmd *cli.Command) error {
+				return action.CompletionOpenBSDKsh(app) //nolint:wrapcheck
+			},
+		}},
+	})
 
-	cmds = append(cmds, action.GetCommands()...)
-	cmds = append(cmds, pwgen.GetCommands()...)
+	cmds = append(cmds, extra...)
+	cmds = append(cmds, extra2...)
 	sort.Slice(cmds, func(i, j int) bool { return cmds[i].Name < cmds[j].Name })
 
 	for i, cmd := range cmds {
-		// fmt.Printf("[%6d - %10s] Before: %p - After %p\n", i, cmds[i].Name, cmds[i].Before, cmds[i].After)
-		cmds[i].Before = mkHookFn("core.pre-hook", cmd.Name, action.Store, cmd.Before)
-		cmds[i].After = mkHookFn("core.post-hook", cmd.Name, action.Store, cmd.After)
-		// fmt.Printf("[%6d - %10s] Before: %p - After %p\n", i, cmds[i].Name, cmds[i].Before, cmds[i].After)
-		// fmt.Println()
+		cmds[i].Before = mkHookBeforeFn("core.pre-hook", cmd.Name, action.Store, cmd.Before)
+		cmds[i].After = mkHookAfterFn("core.post-hook", cmd.Name, action.Store, cmd.After)
 	}
 
 	return cmds
@@ -201,21 +241,41 @@ type pathGetter interface {
 	Path() string
 }
 
-func mkHookFn(hookName, cmdName string, s pathGetter, fn func(c *cli.Context) error) func(c *cli.Context) error {
+func mkHookBeforeFn(hookName, cmdName string, s pathGetter, fn cli.BeforeFunc) cli.BeforeFunc {
 	if fn == nil {
-		return func(c *cli.Context) error {
-			dir := config.String(c.Context, "mounts.path")
+		return func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+			dir := config.String(ctx, "mounts.path")
 
-			return hook.Invoke(c.Context, hookName, dir, cmdName)
+			return ctx, hook.Invoke(ctx, hookName, dir, cmdName)
 		}
 	}
 
-	return func(c *cli.Context) error {
-		if err := fn(c); err != nil {
+	return func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+		var err error
+		ctx, err = fn(ctx, cmd)
+		if err != nil {
+			return ctx, err
+		}
+
+		return ctx, hook.Invoke(ctx, hookName, s.Path(), cmdName, cmd.Args().First())
+	}
+}
+
+func mkHookAfterFn(hookName, cmdName string, s pathGetter, fn cli.AfterFunc) cli.AfterFunc {
+	if fn == nil {
+		return func(ctx context.Context, cmd *cli.Command) error {
+			dir := config.String(ctx, "mounts.path")
+
+			return hook.Invoke(ctx, hookName, dir, cmdName)
+		}
+	}
+
+	return func(ctx context.Context, cmd *cli.Command) error {
+		if err := fn(ctx, cmd); err != nil {
 			return err
 		}
 
-		return hook.Invoke(c.Context, hookName, s.Path(), cmdName, c.Args().First())
+		return hook.Invoke(ctx, hookName, s.Path(), cmdName, cmd.Args().First())
 	}
 }
 
@@ -233,13 +293,13 @@ func parseBuildInfo() (string, string, string) {
 
 	for _, v := range bi.Settings {
 		switch v.Key {
-		case "gitrevision":
+		case "vcs.revision":
 			commit = v.Value[len(v.Value)-8:]
-		case "gitcommittime":
+		case "vcs.time":
 			if bt, err := time.Parse("2006-01-02T15:04:05Z", date); err == nil {
 				date = bt.Format("2006-01-02 15:04:05")
 			}
-		case "gituncommitted":
+		case "vcs.modified":
 			if v.Value == "true" {
 				dirty = " (dirty)"
 			}
@@ -249,8 +309,8 @@ func parseBuildInfo() (string, string, string) {
 	return commit, date, dirty
 }
 
-func makeVersionPrinter(out io.Writer, sv semver.Version) func(c *cli.Context) {
-	return func(c *cli.Context) {
+func makeVersionPrinter(out io.Writer, sv semver.Version) func(cmd *cli.Command) {
+	return func(cmd *cli.Command) {
 		commit, buildtime, dirty := parseBuildInfo()
 		buildInfo := ""
 
@@ -298,12 +358,6 @@ func initContext(ctx context.Context, cfg *config.Config) context.Context {
 	// always trust
 	ctx = gpg.WithAlwaysTrust(ctx, true)
 
-	// check recipients conflicts with always trust, make sure it's not enabled
-	// when always trust is
-	if gpg.IsAlwaysTrust(ctx) {
-		ctx = leaf.WithCheckRecipients(ctx, false)
-	}
-
 	// only emit color codes when stdout is a terminal
 	if !isatty.IsTerminal(os.Stdout.Fd()) {
 		color.NoColor = true
@@ -317,6 +371,9 @@ func initContext(ctx context.Context, cfg *config.Config) context.Context {
 		ctx = ctxutil.WithStdin(ctx, true)
 	}
 
+	// enable following references based on the configuration
+	ctx = ctxutil.WithFollowRef(ctx, config.AsBool(cfg.Get("core.follow-references")))
+
 	// disable colored output on windows since cmd.exe doesn't support ANSI color
 	// codes. Other terminal may do, but until we can figure that out better
 	// disable this for all terms on this platform
@@ -329,6 +386,18 @@ func initContext(ctx context.Context, cfg *config.Config) context.Context {
 			color.NoColor = config.AsBool(cfg.Get("core.nocolor"))
 		}
 	}
+
+	// using a passphrase for the age identity file or not?
+	if pw, isSet := os.LookupEnv("GOPASS_AGE_PASSWORD"); isSet {
+		debug.Log("using age passphrase from env variable GOPASS_AGE_PASSWORD")
+		ctx = ctxutil.WithAgePassphrase(ctx, pw)
+	}
+
+	// The standalone gopass binary owns the `age agent start` subcommand, so it
+	// can auto-start the age agent by re-executing itself. Library embedders do
+	// not register a launcher and get graceful degradation instead of a fork
+	// bomb. See internal/ageagentlauncher.
+	ctx = ageagentlauncher.Register(ctx)
 
 	return ctx
 }

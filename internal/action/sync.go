@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/fatih/color"
@@ -19,37 +20,22 @@ import (
 	"github.com/gopasspw/gopass/internal/tree"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/gopasspw/gopass/pkg/debug"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 	"github.com/xhit/go-str2duration/v2"
 )
 
 var (
 	autosyncInterval = time.Duration(3*24) * time.Hour
 	autosyncLastRun  time.Time
+	autosyncMu       sync.Mutex
 )
 
-func init() {
-	sv := os.Getenv("GOPASS_AUTOSYNC_INTERVAL")
-	if sv == "" {
-		return
-	}
-
-	debug.Log("GOPASS_AUTOSYNC_INTERVAL is deprecated. Please use autosync.interval")
-
-	iv, err := strconv.Atoi(sv)
-	if err != nil {
-		return
-	}
-
-	autosyncInterval = time.Duration(iv*24) * time.Hour
-}
-
 // Sync all stores with their remotes.
-func (s *Action) Sync(c *cli.Context) error {
-	return s.sync(ctxutil.WithGlobalFlags(c), c.String("store"))
+func (s *syncHandler) Sync(ctx context.Context, cmd *cli.Command) error {
+	return s.sync(ctxutil.WithGlobalFlags(ctx, cmd), cmd.String("store"), false)
 }
 
-func (s *Action) autoSync(ctx context.Context) error {
+func (s *syncHandler) autoSync(ctx context.Context) error {
 	if !ctxutil.IsInteractive(ctx) {
 		return nil
 	}
@@ -62,6 +48,14 @@ func (s *Action) autoSync(ctx context.Context) error {
 		out.Warning(ctx, "GOPASS_NO_AUTOSYNC is deprecated. Please set core.autosync = false.")
 
 		return nil
+	}
+
+	if sv := os.Getenv("GOPASS_AUTOSYNC_INTERVAL"); sv != "" {
+		out.Warningf(ctx, "GOPASS_AUTOSYNC_INTERVAL is deprecated. Please use autosync.interval in your config.")
+
+		if iv, err := strconv.Atoi(sv); err == nil {
+			autosyncInterval = time.Duration(iv*24) * time.Hour
+		}
 	}
 
 	if !config.Bool(ctx, "core.autosync") {
@@ -85,10 +79,10 @@ func (s *Action) autoSync(ctx context.Context) error {
 	debug.Log("autosync - interval: %s", syncInterval)
 
 	if time.Since(ls) > syncInterval {
-		err := s.sync(ctx, "")
-		if err != nil {
-			autosyncLastRun = time.Now()
-		}
+		err := s.sync(ctx, "", true)
+		autosyncMu.Lock()
+		autosyncLastRun = time.Now()
+		autosyncMu.Unlock()
 
 		return err
 	}
@@ -96,15 +90,22 @@ func (s *Action) autoSync(ctx context.Context) error {
 	return nil
 }
 
-func (s *Action) sync(ctx context.Context, store string) error {
+func (s *syncHandler) sync(ctx context.Context, store string, isAutosync bool) error {
 	// we just did a full sync, no need to run it again
-	if time.Since(autosyncLastRun) < 10*time.Second {
-		debug.Log("skipping sync. last sync %ds ago", time.Since(autosyncLastRun))
+	autosyncMu.Lock()
+	lastRun := autosyncLastRun
+	autosyncMu.Unlock()
+
+	if time.Since(lastRun) < 10*time.Second {
+		debug.Log("skipping sync. last sync %ds ago", time.Since(lastRun))
 
 		return nil
 	}
 
-	out.Printf(ctx, "🚥 Syncing with all remotes ...")
+	// check if user asked for single store/remote sync or all remote sync
+	if store == "" {
+		out.Printf(ctx, "🚥 Syncing with all remotes ...")
+	}
 
 	numEntries := 0
 	if l, err := s.Store.Tree(ctx); err == nil {
@@ -118,6 +119,7 @@ func (s *Action) sync(ctx context.Context, store string) error {
 	// sync all stores (root and all mounted sub stores).
 	for _, mp := range mps {
 		if store != "" {
+			out.Printf(ctx, "🚥 Syncing with store/remote %q...", store)
 			if store != "<root>" && mp != store {
 				continue
 			}
@@ -127,9 +129,14 @@ func (s *Action) sync(ctx context.Context, store string) error {
 		}
 
 		numMPs++
-		_ = s.syncMount(ctx, mp)
+		_ = s.syncMount(ctx, mp, isAutosync)
 	}
-	out.OKf(ctx, "All done")
+
+	if numMPs > 0 {
+		out.OKf(ctx, "All done")
+	} else {
+		out.Printf(ctx, "⚠️ No remotes were found")
+	}
 
 	// If we just sync'ed all stores we can reset the auto-sync interval
 	if store == "" {
@@ -158,13 +165,15 @@ func (s *Action) sync(ctx context.Context, store string) error {
 }
 
 // syncMount syncs a single mount.
-func (s *Action) syncMount(ctx context.Context, mp string) error {
-	// using GetM here to get the value for this mount, it might be different
-	// than the global value
-	if as := s.cfg.GetM(mp, "core.autosync"); as == "false" {
-		debug.Log("not syncing %s, autosync is disabled for this mount", mp)
+func (s *syncHandler) syncMount(ctx context.Context, mp string, isAutosync bool) error {
+	if isAutosync {
+		// using GetM here to get the value for this mount, it might be different
+		// from the global value
+		if as := s.cfg.GetM(mp, "core.autosync"); as == "false" {
+			debug.Log("not syncing %s, autosync is disabled for this mount", mp)
 
-		return nil
+			return nil
+		}
 	}
 
 	ctxno := out.WithNewline(ctx, false)
@@ -247,13 +256,7 @@ func syncImportKeys(ctx context.Context, sub *leaf.Store, name string) error {
 
 func syncExportKeys(ctx context.Context, sub *leaf.Store, name string) error {
 	// export keys.
-	rs, err := sub.GetRecipients(ctx, "")
-	if err != nil {
-		out.Errorf(ctx, "Failed to load recipients for %q: %s", name, err)
-
-		return err
-	}
-	exported, err := sub.UpdateExportedPublicKeys(ctx, rs.IDs())
+	exported, err := sub.UpdateExportedPublicKeys(ctx)
 	if err != nil {
 		out.Errorf(ctx, "Failed to export missing public keys for %q: %s", name, err)
 

@@ -1,3 +1,6 @@
+// Package updater provides a simple update mechanism for gopass.
+// It will check for updates, download the latest release and
+// verify the GPG signature of the release.
 package updater
 
 import (
@@ -16,12 +19,13 @@ import (
 // UpdateMoveAfterQuit is exported for testing.
 var UpdateMoveAfterQuit = true
 
-// Update will start the interactive update assistant.
+// Update will start the interactive update assistant. If pre is true it will
+// consider pre-releases such as release candidates.
 //
 //nolint:goerr113
-func Update(ctx context.Context, currentVersion semver.Version) error {
+func Update(ctx context.Context, currentVersion semver.Version, pre bool) error {
 	if err := IsUpdateable(ctx); err != nil {
-		out.Errorf(ctx, "Your gopass binary is externally managed. Can not update: %q", err)
+		out.Errorf(ctx, "Your gopass binary is externally managed. Cannot update: %q", err)
 
 		return err
 	}
@@ -32,6 +36,10 @@ func Update(ctx context.Context, currentVersion semver.Version) error {
 	}
 
 	rel, err := FetchLatestRelease(ctx)
+	if pre {
+		rel, err = FetchLatestPrerelease(ctx)
+	}
+
 	if err != nil {
 		return err
 	}

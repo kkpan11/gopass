@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/blang/semver/v4"
+	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/pkg/debug"
 )
 
@@ -21,6 +22,10 @@ const (
 	GitFS
 	// FossilFS is a filesystem-backed storage with Fossil.
 	FossilFS
+	// JJ is a filesystem-backed storage with Jujutsu.
+	JJFS
+	// CryptFS is a filename encrypting storage.
+	CryptFS
 )
 
 func (s StorageBackend) String() string {
@@ -56,14 +61,14 @@ func DetectStorage(ctx context.Context, path string) (Storage, error) {
 	// The call to HasStorageBackend is important since GetStorageBackend will always return FS
 	// if nothing is found in the context.
 	if be, err := StorageRegistry.Get(GetStorageBackend(ctx)); HasStorageBackend(ctx) && err == nil {
-		debug.V(1).Log("Trying requested %s for %s", be, path)
+		debug.V(1).Log("Trying requested storage backend %q for %q", be, path)
 		st, err := be.New(ctx, path)
 		if err == nil {
-			debug.Log("Using requested %s for %s", be, path)
+			debug.Log("Successfully loaded requested storage backend %q for %q", be, path)
 
 			return st, nil
 		}
-		debug.Log("Failed to use requested %s for %s: %s", be, path, err)
+		debug.Log("Failed to use requested storage backend %q for %s: %q", be, path, err)
 
 		// fallback to FS
 		be, err := StorageRegistry.Get(FS)
@@ -75,15 +80,22 @@ func DetectStorage(ctx context.Context, path string) (Storage, error) {
 		return be.Init(ctx, path)
 	}
 
+	// Check if a backend is explicitly configured via the config file.
+	if name := config.String(ctx, "storage.backend"); name != "" {
+		if st, err := detectStorageByName(ctx, name, path); err == nil {
+			return st, nil
+		}
+	}
+
 	// Nothing requested in the context. Try to detect the backend.
 	for _, be := range StorageRegistry.Prioritized() {
-		debug.V(1).Log("Trying %s for %s", be, path)
+		debug.V(1).Log("Trying storage backend %q for %q", be, path)
 		if err := be.Handles(ctx, path); err != nil {
 			debug.Log("failed to use %s for %s: %s", be, path, err)
 
 			continue
 		}
-		debug.Log("Using detected %s for %s", be, path)
+		debug.Log("Detected storage backend %q for %q", be, path)
 
 		return be.New(ctx, path)
 	}
@@ -98,10 +110,36 @@ func DetectStorage(ctx context.Context, path string) (Storage, error) {
 	return be.Init(ctx, path)
 }
 
+// detectStorageByName looks up a storage backend by name and tries to open path with it.
+func detectStorageByName(ctx context.Context, name, path string) (Storage, error) {
+	key, err := StorageRegistry.Backend(name)
+	if err != nil {
+		debug.Log("WARNING: configured storage backend %q not found, falling back to auto-detect", name)
+
+		return nil, err
+	}
+
+	be, err := StorageRegistry.Get(key)
+	if err != nil {
+		return nil, err
+	}
+
+	debug.Log("Using explicitly configured storage backend %q for %q", name, path)
+
+	st, err := be.New(ctx, path)
+	if err != nil {
+		debug.Log("Failed to use configured storage backend %q for %q: %s", name, path, err)
+
+		return nil, err
+	}
+
+	return st, nil
+}
+
 // NewStorage initializes an existing storage backend.
 func NewStorage(ctx context.Context, id StorageBackend, path string) (Storage, error) {
 	if be, err := StorageRegistry.Get(id); err == nil {
-		debug.Log("Using %s for %s", be, path)
+		debug.Log("Using storage backend %q for %q", be, path)
 
 		return be.New(ctx, path)
 	}

@@ -1,6 +1,7 @@
 package action
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"runtime"
@@ -11,7 +12,7 @@ import (
 	"github.com/gopasspw/gopass/internal/out"
 	"github.com/gopasspw/gopass/internal/tree"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 var escapeRegExp = regexp.MustCompile(`('|"|\s|\(|\)|\<|\>|\&|\;|\#|\\|\||\*|\?)`)
@@ -35,9 +36,9 @@ func bashEscape(s string) string {
 	})
 }
 
-// Complete prints a list of all password names to os.Stdout.
-func (s *Action) Complete(c *cli.Context) {
-	ctx := ctxutil.WithGlobalFlags(c)
+// Complete prints a list of all password names to os.Stdout, for bash completion.
+func (s *miscHandler) Complete(ctx context.Context, cmd *cli.Command) {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
 	_, err := s.Store.IsInitialized(ctx) // important to make sure the structs are not nil.
 	if err != nil {
 		out.Errorf(ctx, "Store not initialized: %s", err)
@@ -55,7 +56,7 @@ func (s *Action) Complete(c *cli.Context) {
 }
 
 // CompletionOpenBSDKsh returns an OpenBSD ksh script used for auto completion.
-func (s *Action) CompletionOpenBSDKsh(a *cli.App) error {
+func (s *miscHandler) CompletionOpenBSDKsh(a *cli.Command) error {
 	out := `
 PASS_LIST=$(gopass ls -f)
 set -A complete_gopass -- $PASS_LIST %s
@@ -79,12 +80,13 @@ set -A complete_gopass -- $PASS_LIST %s
 }
 
 // CompletionBash returns a bash script used for auto completion.
-func (s *Action) CompletionBash(c *cli.Context) error {
+func (s *miscHandler) CompletionBash(ctx context.Context, cmd *cli.Command) error {
 	out := `_gopass_bash_autocomplete() {
      local cur opts base
      COMPREPLY=()
      cur="${COMP_WORDS[COMP_CWORD]}"
-     opts=$( ${COMP_WORDS[@]:0:$COMP_CWORD} --generate-bash-completion )
+     # Use error handling to prevent crashes from invalid flags
+     opts=$( ${COMP_WORDS[@]:0:$COMP_CWORD} --generate-shell-completion 2>/dev/null ) || opts=""
      local IFS=$'\n'
      COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
      return 0
@@ -101,7 +103,7 @@ func (s *Action) CompletionBash(c *cli.Context) error {
 }
 
 // CompletionFish returns an autocompletion script for fish.
-func (s *Action) CompletionFish(a *cli.App) error {
+func (s *miscHandler) CompletionFish(a *cli.Command) error {
 	if a == nil {
 		return fmt.Errorf("app is nil")
 	}
@@ -116,7 +118,7 @@ func (s *Action) CompletionFish(a *cli.App) error {
 }
 
 // CompletionZSH returns a zsh completion script.
-func (s *Action) CompletionZSH(a *cli.App) error {
+func (s *miscHandler) CompletionZSH(a *cli.Command) error {
 	comp, err := zshcomp.GetCompletion(a)
 	if err != nil {
 		return err

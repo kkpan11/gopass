@@ -4,17 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path"
-	"path/filepath"
 	"strings"
 
+	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/out"
 	"github.com/gopasspw/gopass/internal/store"
 	"github.com/gopasspw/gopass/internal/store/leaf"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/gopasspw/gopass/pkg/debug"
-	"github.com/gopasspw/gopass/pkg/fsutil"
 )
 
 // Copy will copy one entry to another location. Multi-store copies are
@@ -46,26 +44,39 @@ func (r *Store) move(ctx context.Context, from, to string, del bool) error {
 		return err
 	}
 
-	if err := subFrom.Storage().TryCommit(ctx, fmt.Sprintf("Move from %s to %s", from, to)); del && err != nil {
+	if !ctxutil.IsGitCommit(ctx) {
+		return nil
+	}
+
+	commitMsg := ctxutil.GetCommitMessage(ctx)
+	if err := subFrom.Storage().TryCommit(ctx, commitMsg); del && err != nil {
 		return fmt.Errorf("failed to commit changes to git (%s): %w", subFrom.Alias(), err)
 	}
 
 	if !subFrom.Equals(subTo) {
-		if err := subTo.Storage().TryCommit(ctx, fmt.Sprintf("Move from %s to %s", from, to)); err != nil {
+		if err := subTo.Storage().TryCommit(ctx, commitMsg); err != nil {
 			return fmt.Errorf("failed to commit changes to git (%s): %w", subTo.Alias(), err)
 		}
 	}
 
-	if err := subFrom.Storage().TryPush(ctx, "", ""); err != nil {
-		return fmt.Errorf("failed to push change to git remote: %w", err)
+	if config.AsBool(r.cfg.GetM(subFrom.Alias(), "core.autopush")) {
+		if err := subFrom.Storage().TryPush(ctx, "", ""); err != nil {
+			return fmt.Errorf("failed to push change to git remote: %w", err)
+		}
+	} else {
+		debug.Log("not pushing %q to git remote, core.autopush is false", subFrom.Alias())
 	}
 
 	if subFrom.Equals(subTo) {
 		return nil
 	}
 
-	if err := subTo.Storage().TryPush(ctx, "", ""); err != nil {
-		return fmt.Errorf("failed to push change to git remote: %w", err)
+	if config.AsBool(r.cfg.GetM(subTo.Alias(), "core.autopush")) {
+		if err := subTo.Storage().TryPush(ctx, "", ""); err != nil {
+			return fmt.Errorf("failed to push change to git remote: %w", err)
+		}
+	} else {
+		debug.Log("not pushing %q to git remote, core.autopush is false", subTo.Alias())
 	}
 
 	return nil
@@ -127,7 +138,7 @@ func (r *Store) moveFromTo(ctx context.Context, subFrom *leaf.Store, from, to, f
 			return fmt.Errorf("source %s does not exist in source store %s: %w", from, subFrom.Alias(), err)
 		}
 
-		if err := r.Set(ctxutil.WithCommitMessage(ctx, fmt.Sprintf("Move from %s to %s", src, dst)), dst, content); err != nil {
+		if err := r.Set(ctx, dst, content); err != nil {
 			if !errors.Is(err, store.ErrMeaninglessWrite) {
 				return fmt.Errorf("failed to save secret %q to store: %w", to, err)
 			}
@@ -159,44 +170,25 @@ func (r *Store) directMove(ctx context.Context, from, to string, del bool) error
 
 	// will also remove the store prefix, if applicable
 	subFrom, from := r.getStore(from)
+
+	// we don't remove store prefix for destination, as it can be a new folder
 	subTo, to := r.getStore(to)
 
-	if subFrom.Equals(subTo) {
-		debug.Log("directMove from %q to %q: same store", from, to)
-
-		if del {
-			return subFrom.Move(ctx, from, to)
-		}
-
-		return subFrom.Copy(ctx, from, to)
+	if !subFrom.Equals(subTo) {
+		// Cross-store moves must go through Get+Set so the secret is
+		// decrypted and then re-encrypted for the destination store's
+		// recipients. Copying the raw ciphertext would leave the secret
+		// encrypted only for the source store's key set.
+		return fmt.Errorf("cross-store move requires re-encryption")
 	}
 
-	debug.Log("cross mount direct move from %s%s to %s%s", subFrom.Alias(), from, subTo.Alias(), to)
-
-	// assemble source and destination paths, call fsutil.CopyFile(from, to), remove source
-	// if del is true and then git add and commit both stores.
-	sfn := filepath.Join(subFrom.Path(), subFrom.Passfile(from))
-	dfn := filepath.Join(subTo.Path(), subTo.Passfile(to))
-
-	if err := fsutil.CopyFile(sfn, dfn); err != nil {
-		return fmt.Errorf("failed to copy %q to %q: %w", from, to, err)
-	}
+	debug.Log("directMove from %q to %q: same store", from, to)
 
 	if del {
-		if err := os.Remove(sfn); err != nil {
-			return fmt.Errorf("failed to delete %q from %s: %w", sfn, subFrom.Alias(), err)
-		}
+		return subFrom.Move(ctx, from, to)
 	}
 
-	if err := subFrom.Storage().Add(ctx, sfn); err != nil {
-		debug.Log("failed to add %q to %s: %w", sfn, subFrom.Alias(), err)
-	}
-
-	if err := subTo.Storage().Add(ctx, dfn); err != nil {
-		debug.Log("failed to add %q to %s: %w", dfn, subTo.Alias(), err)
-	}
-
-	return nil
+	return subFrom.Copy(ctx, from, to)
 }
 
 func computeMoveDestination(src, from, to string, srcIsDir, dstIsDir bool) string {
@@ -242,7 +234,7 @@ func computeMoveDestination(src, from, to string, srcIsDir, dstIsDir bool) strin
 func (r *Store) Delete(ctx context.Context, name string) error {
 	store, sn := r.getStore(name)
 	if sn == "" {
-		return fmt.Errorf("can not delete a mount point. Use `gopass mounts remove %s`", store.Alias())
+		return fmt.Errorf("cannot delete a mount point. Use `gopass mounts remove %s`", store.Alias())
 	}
 
 	return store.Delete(ctx, sn)
@@ -252,7 +244,7 @@ func (r *Store) Delete(ctx context.Context, name string) error {
 func (r *Store) Prune(ctx context.Context, tree string) error {
 	for mp := range r.mounts {
 		if strings.HasPrefix(mp, tree) {
-			return fmt.Errorf("can not prune subtree with mounts. Unmount first: `gopass mounts remove %s`", mp)
+			return fmt.Errorf("cannot prune subtree with mounts. Unmount first: `gopass mounts remove %s`", mp)
 		}
 	}
 

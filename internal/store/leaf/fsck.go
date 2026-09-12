@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/gopasspw/gopass/internal/backend"
+	"github.com/gopasspw/gopass/internal/backend/crypto/age"
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/diff"
 	"github.com/gopasspw/gopass/internal/out"
@@ -28,11 +29,13 @@ const (
 )
 
 func (e ErrorSeverity) String() string {
-	switch {
-	case e == errsNonFatal:
+	switch e {
+	case errsNonFatal:
 		return "non-fatal"
-	case e == errsFatal:
+	case errsFatal:
 		return "fatal"
+	case errsNil:
+		return "nil"
 	default:
 		return "nil"
 	}
@@ -89,7 +92,7 @@ func (f *fsckMultiError) ErrorOrNil() error {
 }
 
 // Fsck checks all entries matching the given prefix.
-func (s *Store) Fsck(ctx context.Context, path string) error {
+func (s *Store) Fsck(ctx context.Context, path string, progress ctxutil.ProgressCallback) error {
 	ctx = out.AddPrefix(ctx, "["+s.alias+"] ")
 	ctx = config.WithMount(ctx, s.alias)
 	debug.Log("Checking %s", path)
@@ -109,11 +112,14 @@ func (s *Store) Fsck(ctx context.Context, path string) error {
 	// make sure all recipients are valid
 	debug.Log("Checking recipients")
 	if err := s.CheckRecipients(ctx); err != nil {
-		if IsCheckRecipients(ctx) {
-			return fmt.Errorf("invalid recipients found: %w", err)
-		}
-
 		out.Errorf(ctx, "Invalid recipients found: %s", err)
+	}
+
+	// check for case-conflicting entries that would collide on
+	// case-insensitive filesystems.
+	debug.Log("Checking for case conflicts")
+	if err := s.fsckCheckCaseConflicts(ctx); err != nil {
+		out.Warningf(ctx, "Case conflicts detected: %s", err)
 	}
 
 	// then we'll make sure all the secrets are readable by us and every
@@ -122,7 +128,7 @@ func (s *Store) Fsck(ctx context.Context, path string) error {
 		out.Printf(ctx, "Checking all secrets matching %s", path)
 	}
 
-	if err := s.fsckLoop(ctx, path); err != nil {
+	if err := s.fsckLoop(ctx, path, progress); err != nil {
 		return err
 	}
 
@@ -141,8 +147,11 @@ func (s *Store) Fsck(ctx context.Context, path string) error {
 	return nil
 }
 
-func (s *Store) fsckLoop(ctx context.Context, path string) error {
-	pcb := ctxutil.GetProgressCallback(ctx)
+func (s *Store) fsckLoop(ctx context.Context, path string, progress ctxutil.ProgressCallback) error {
+	pcb := progress
+	if pcb == nil {
+		pcb = func() {}
+	}
 
 	// disable network ops, we will push at the end. pushing on possibly
 	// every single secret could be terribly slow.
@@ -171,27 +180,36 @@ func (s *Store) fsckLoop(ctx context.Context, path string) error {
 		ctx = ctxutil.AddToCommitMessageBody(ctx, "- updated public keys")
 	}
 
-	sort.Strings(names)
+	slices.Sort(names)
 
 	debug.Log("names (%d): %q", len(names), names)
 	buf := &strings.Builder{}
+	var mimeConverted int
+
 	for _, name := range names {
 		pcb()
-		if strings.HasPrefix(name, s.alias+"/") {
-			name = strings.TrimPrefix(name, s.alias+"/")
+		if after, ok := strings.CutPrefix(name, s.alias+"/"); ok {
+			name = after
 		}
 
 		debug.Log("[%s] Checking %s", path, name)
 
-		msg, err := s.fsckCheckEntry(ctx, name)
+		msg, fromMime, err := s.fsckCheckEntry(ctx, name)
 		if err != nil {
-			warnings.WriteString(fmt.Errorf("failed to check %q:\n    %w\n", name, err).Error())
+			fmt.Fprintf(&warnings, "failed to check %q:\n    %s\n", name, err)
 
 			continue
 		}
 
+		if fromMime {
+			mimeConverted++
+		}
+
 		buf.WriteString(msg)
 		buf.WriteString("\n")
+	}
+	if mimeConverted > 0 {
+		out.Printf(ctx, "Converted %d secret(s) from legacy MIME format", mimeConverted)
 	}
 	if buf.Len() > 0 {
 		ctx = ctxutil.AddToCommitMessageBody(ctx, buf.String())
@@ -230,7 +248,7 @@ func (s *Store) fsckUpdatePublicKeys(ctx context.Context) error {
 
 	// then export our (possibly updated) keys for consumption
 	// by others.
-	exported, err := s.UpdateExportedPublicKeys(ctx, rs)
+	exported, err := s.UpdateExportedPublicKeys(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to update exported pubkeys: %w", err)
 	}
@@ -244,17 +262,17 @@ type convertedSecret interface {
 	FromMime() bool
 }
 
-func (s *Store) fsckCheckEntry(ctx context.Context, name string) (string, error) {
+func (s *Store) fsckCheckEntry(ctx context.Context, name string) (string, bool, error) {
 	errs := &fsckMultiError{}
 	recpNeedFix := false
 
 	merr := s.fsckCheckRecipients(ctx, name)
 	if merr.ErrorOrNil() != nil {
 		if merr.Severity == errsFatal {
-			return "", errs.Append(errsFatal, fmt.Errorf("Checking recipients for %s failed:\n    %w", name, merr)).ErrorOrNil()
+			return "", false, errs.Append(errsFatal, fmt.Errorf("checking recipients for %s failed:\n    %w", name, merr)).ErrorOrNil()
 		}
-		// the only errsNonFatal error from that function are missing/extra recipients,
-		// which isn't much of an error since we have yet to correct that.
+		// the only errsNonFatal error from that function are missing/extra recipients, or unsupported recipient checks
+		// all of which aren't much of an issue since we have yet to correct that by re-encrypting.
 		recpNeedFix = true
 		_ = errs.Append(merr.Severity, merr)
 	}
@@ -263,27 +281,26 @@ func (s *Store) fsckCheckEntry(ctx context.Context, name string) (string, error)
 	// if this fails there is no way we could fix anything
 	if !IsFsckDecrypt(ctx) {
 		if !recpNeedFix {
-			return "", nil
+			return "", false, nil
 		}
 
-		return "", errs.Append(errsFatal, fmt.Errorf("Run fsck with the --decrypt flag to re-encrypt it automatically, or edit the secret %s yourself.", name)).ErrorOrNil()
+		return "", false, errs.Append(errsFatal, fmt.Errorf("secret %s needs re-encryption", name)).ErrorOrNil()
 	}
 
 	// we need to make sure Parsing is enabled in order to parse old Mime secrets
 	ctx = ctxutil.WithShowParsing(ctx, true)
 	sec, err := s.Get(ctx, name)
 	if err != nil {
-		return "", errs.Append(errsFatal, fmt.Errorf("failed to decode secret %s: %w", name, err)).ErrorOrNil()
+		return "", false, errs.Append(errsFatal, fmt.Errorf("failed to decode secret %s: %w", name, err)).ErrorOrNil()
 	}
 
 	// check if this is still an old MIME secret.
 	// Note: the secret was already converted when it was parsed during Get.
 	// This is just checking if it was converted from MIME or not.
-	// This branch is pretty much useless right now, but I'd like to add some
-	// reporting on how many secrets were converted from MIME to new format.
-	// TODO: report these stats
+	var fromMime bool
 	if cs, ok := sec.(convertedSecret); ok && cs.FromMime() {
 		debug.Log("leftover Mime secret: %s", name)
+		fromMime = true
 	}
 
 	if recpNeedFix {
@@ -293,23 +310,23 @@ func (s *Store) fsckCheckEntry(ctx context.Context, name string) (string, error)
 	}
 
 	if err := s.Set(ctxutil.WithGitCommit(ctx, false), name, sec); err != nil {
-		return "", errs.Append(errsFatal, fmt.Errorf("failed to write secret %s: %w", name, err)).ErrorOrNil()
+		return "", false, errs.Append(errsFatal, fmt.Errorf("failed to write secret %s: %w", name, err)).ErrorOrNil()
 	}
 
 	merr = s.fsckCheckRecipients(ctx, name)
 	if merr.ErrorOrNil() != nil {
 		if merr.Severity == errsFatal {
-			_ = errs.Append(merr.Severity, fmt.Errorf("Checking recipients for %s failed:\n    %w", name, merr))
+			_ = errs.Append(merr.Severity, fmt.Errorf("checking recipients for %s failed:\n    %w", name, merr))
 		} else {
 			_ = errs.Append(merr.Severity, merr)
 		}
 	}
 
 	if merr.IsError() {
-		return "", merr.ErrorOrNil()
+		return "", false, merr.ErrorOrNil()
 	}
 
-	return fmt.Sprintf("- re-encrypt secret %s", name), nil
+	return fmt.Sprintf("- re-encrypt secret %s", name), fromMime, nil
 }
 
 func (s *Store) fsckCheckRecipients(ctx context.Context, name string) *fsckMultiError {
@@ -317,9 +334,16 @@ func (s *Store) fsckCheckRecipients(ctx context.Context, name string) *fsckMulti
 
 	// now compare the recipients this secret was encoded for and fix it if
 	// it doesn't match.
-	ciphertext, err := s.storage.Get(ctx, s.Passfile(name))
+	ciphertext, err := s.storage.Get(ctx, s.passfile(ctx, name))
 	if err != nil {
 		return e.Append(errsFatal, fmt.Errorf("failed to get raw secret: %w", err))
+	}
+
+	if _, ok := s.crypto.(*age.Age); ok {
+		debug.Log("RecipientIDs not supported yet by age")
+		_ = e.Append(errsNonFatal, fmt.Errorf("recipients check not supported by age backend for now"))
+
+		return e
 	}
 
 	itemRecps, err := s.crypto.RecipientIDs(ctx, ciphertext)
@@ -339,13 +363,44 @@ func (s *Store) fsckCheckRecipients(ctx context.Context, name string) *fsckMulti
 	// check itemRecps matches storeRecps
 	extra, missing := diff.List(perItemStoreRecps, itemRecps)
 	if len(missing) > 0 {
-		_ = e.Append(errsNonFatal, fmt.Errorf("Missing recipients on %s: %+v\nRun fsck with the --decrypt flag to re-encrypt it automatically, or edit this secret yourself.", name, missing))
+		_ = e.Append(errsNonFatal, fmt.Errorf("missing recipients on %s: %+v", name, missing))
 	}
 	if len(extra) > 0 {
-		_ = e.Append(errsNonFatal, fmt.Errorf("Extra recipients on %s: %+v\nRun fsck with the --decrypt flag to re-encrypt it automatically, or edit this secret yourself.", name, extra))
+		_ = e.Append(errsNonFatal, fmt.Errorf("extra recipients on %s: %+v", name, extra))
 	}
 
 	return e
+}
+
+// fsckCheckCaseConflicts lists all secrets in the store and warns if any two
+// entries have the same name after lowercasing. Such entries would collide on
+// case-insensitive filesystems (macOS, Windows) and can cause data loss.
+func (s *Store) fsckCheckCaseConflicts(ctx context.Context) error {
+	names, err := s.List(ctx, "")
+	if err != nil {
+		return fmt.Errorf("failed to list entries: %w", err)
+	}
+
+	seen := make(map[string]string, len(names))
+	var conflicts []string
+
+	for _, name := range names {
+		lower := strings.ToLower(name)
+		if prev, ok := seen[lower]; ok {
+			conflicts = append(conflicts, fmt.Sprintf("%q and %q", prev, name))
+		} else {
+			seen[lower] = name
+		}
+	}
+
+	if len(conflicts) > 0 {
+		slices.Sort(conflicts)
+
+		return fmt.Errorf("case-conflicting entries that would collide on case-insensitive filesystems: %s",
+			strings.Join(conflicts, ", "))
+	}
+
+	return nil
 }
 
 func fingerprints(ctx context.Context, crypto backend.Crypto, in []string) []string {
@@ -384,8 +439,8 @@ func compareStringSlices(want, have []string) ([]string, []string) {
 		}
 	}
 
-	sort.Strings(missing)
-	sort.Strings(extra)
+	slices.Sort(missing)
+	slices.Sort(extra)
 
 	return missing, extra
 }

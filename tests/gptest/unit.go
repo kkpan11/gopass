@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	aclip "github.com/atotto/clipboard"
+	"github.com/gopasspw/clipboard"
 	"github.com/stretchr/testify/require"
 )
 
@@ -50,7 +50,7 @@ func (u Unit) GPGHome() string {
 func NewUnitTester(t *testing.T) *Unit {
 	t.Helper()
 
-	aclip.Unsupported = true
+	clipboard.ForceUnsupported = true
 
 	td := t.TempDir()
 	u := &Unit{
@@ -85,7 +85,7 @@ func NewUnitTester(t *testing.T) *Unit {
 
 func (u Unit) initConfig() error {
 	if err := os.MkdirAll(filepath.Dir(u.GPConfig()), 0o755); err != nil {
-		return err
+		return fmt.Errorf("failed to initialize the test config at %q: %w", u.GPConfig(), err)
 	}
 
 	err := os.WriteFile(

@@ -24,10 +24,14 @@ Flag | Aliases | Description
 `--clip` | `-c` | Copy the password value into the clipboard and don't show the content.
 `--alsoclip` | `-C` | Copy the password value into the clipboard and show the content.
 `--qr` | | Encode the password field as a QR code and print it. Note: When combining with `-c`/`-C` the unencoded password is copied. Not the QR code.
-`--unsafe` | `-u` | Display unsafe content (e.g. the password) even when the `safecontent` option is set. No-op when `safecontent` is `false`.
+`--qrbody` | | Encode the entire body (all lines after the first) as a QR code and print it.
+`--unsafe` | `-u`, `-f` | Display unsafe content (e.g. the password) even when the `safecontent` option is set. No-op when `safecontent` is `false`. `-f` is a deprecated alias kept for backward compatibility.
+`--safe` | `-s` | Hide unsafe content (e.g. the password) even when the `safecontent` option is `false`. Overrides the config value for this invocation.
 `--password` | `-o` | Display only the password. For use in scripts. Takes precedence over other flags.
 `--revision` | `-r` | Display a specific revision of the entry. Use an exact version identifier from `gopass history` or the special `-<N>` syntax. Does not work with native (e.g. git) refs.
 `--noparsing` | `-n` | Do not parse the content, disable YAML and Key-Value functions.
+`--nofuzzysearch` | | Do not start fuzzy search if the requested entry is not found.
+`--nosync` | | Disable auto-sync for this invocation.
 `--chars` | | Display selected characters from the password.
 
 ## Details
@@ -38,29 +42,42 @@ config options.
 Note: This section describes the expected behaviour, not necessarily the observed behaviour.
 If you notice any discrepancies please file a bug and we will try to fix it.
 
-TODO: We need to specify the expectations around new lines.
+Note: The parser ensures every parsed secret contains a terminating newline, even if the stored content did not. When displaying via `gopass show` the trailing newline is suppressed so that copying output does not include a spurious newline character. When piping output to another command (`gopass show entry | …`), the trailing newline is preserved to make the output compatible with standard Unix text-processing tools.
 
 * When no flag is set the `show` command will display the full content of the secret and will parse it to support key-value lookup and YAML entries.
-  If the `safecontent` option is set to `true` any secret fields (current default is only `password`) are replaced with a random number of '*' characters (length: 5-10). 
+  If the `safecontent` option is set to `true` any secret fields (current default is only `password`) are replaced with a random number of '*' characters (length: 5-10).
   Using the `--unsafe` flag will reveal these fields even if `safecontent` is enabled. `--password` takes precedence of `safecontent=true` as well and displays only the password.
-* The `--noparsing` flag will disable all parsing of the output, this can help debugging YAML secrets for example, where `key: 0123` actually parses into octal for 83. 
+* The `--noparsing` flag will disable all parsing of the output, this can help debugging YAML secrets for example, where `key: 0123` actually parses into octal for 83.
 * The `--clip` flag will copy the value of the `Password` field to the clipboard and doesn't display any part of the secret.
 * The `--alsoclip` option will copy the value of the `Password` field but also display the secret content depending on the `safecontent` setting, i.e. obstructing the `Password` field if `safecontent` is `true` or just displaying it if not.
 * The `--qr` flags operates complementary to other flags. It will *additionally* format the value of the `Password` entry as a QR code and display it. Other than that it will honor the other options, e.g. `gopass show --qr` will display the QR code *and* the whole secret content below. One special case is the `-o` flag, this flag doesn't make a lot of sense in combination, so if both `--qr` and `-o` are given only the QR code will be displayed.
+* When an entry is not found, `gopass show` can start an interactive fuzzy search by default. This can be disabled globally with `show.fuzzysearch=false` or for one invocation via `--nofuzzysearch`.
 * Since gopass plans to supports different RCS backends we do not support arbitrary git refs as arguments to the `--revision` flag. Using those might work, but this is explicitly not supported and bug reports will be closed as `wont-fix`. There are two issues with using arbitrary git refs is that (a) this doesn't work with non-git RCS backends and (b) git versions a whole repository, not single files. So the revision `HEAD^`
   might not have any changes for a given entry. Thus we only support specifc revisions obtained from `gopass history` or our custom syntax `-N` where N is an integer identifying a specific commit before `HEAD` (cf. `HEAD~N`).
 
+## Exit codes
+
+| Code | Meaning |
+|-----:|---------|
+| 0 | Secret displayed successfully |
+| 1 | Revision list could not be retrieved; or QR encoding failed |
+| 2 | No name provided |
+| 10 | Secret not found; or requested YAML key, line, or password field not found |
+| 11 | Secret could not be decrypted |
+
+See [docs/exit-codes.md](../exit-codes.md) for the full table.
+
 ## Parsing and secrets
 
-Secrets are stored on disk as provided, but are parsed upon display to provide extra features such as the ability 
+Secrets are stored on disk as provided, but are parsed upon display to provide extra features such as the ability
 to show the value of a key using:  `gopass show entry key`.
 
 The secrets are split into 3 categories:
- - the plain type, which is just a plain secret without key-value capabilities 
+ - the plain type, which is just a plain secret without key-value capabilities
     ```
     this is a plain secret
     using multiple lines
-    
+
     and that's it
     ```
     gets parsed to the same value
@@ -71,7 +88,7 @@ The secrets are split into 3 categories:
     this is a KV secret
     where: the first line is the password
     and: the keys are separated from their value by :
-    
+
     and maybe we have a body text
     below it
     ```
@@ -79,8 +96,8 @@ The secrets are split into 3 categories:
    ```
     and: the keys are separated from their value by :
     where: the first line is the password
-    
-    
+
+
     and maybe we have a body text
     below it
     ```
@@ -108,7 +125,9 @@ The secrets are split into 3 categories:
    username, it should be enclosed in string delimiters: `username: "0123"` will always be parsed as the string `0123`
    and not as octal.
 
-Both the key-value and the YAML format support so-called "unsafe-keys", which is a key-value that allows you to specify keys that should be hidden when using `gopass show` with `gopass config safecontent` set to true.
+By default, `safecontent` will remove the first line (the password), every line starting with `otpauth://` in the body, and every YAML value whose key is one of the following: `hotp`, `otpauth`, `password`, `totp`. The `show.hidden-keys` configuration option can add further keys to this list.
+
+Both the key-value and the YAML format support so-called "unsafe-keys", which is a key-value that allows you to specify keys that should be hidden when using `gopass show` with `gopass config show.safecontent` set to true.
 E.g:
 ```
 supersecret
@@ -119,7 +138,7 @@ name: John Smith
 unsafe-keys: age,secret
 ```
 will display (with safecontent enabled):
-``` 
+```
 age: *****
 name: John Smith
 secret: *****
@@ -128,4 +147,8 @@ unsafe-keys: age,secret
 ```
 unless it is called with `gopass show -n` that would disable parsing of the body, but still hide the password, or `gopass show -f` that would show everything that was hidden, including the password.
 
-Notice that if the option `parsing` is disabled in the config, then all secrets are handled as plain secrets.
+You can read more about secrets formats in its [documentation](../secrets.md).
+
+Notice that `--noparsing` disables parsing for a single invocation, effectively
+handling the secret as a plain (unparsed) secret. There is no configuration
+option to disable parsing globally.

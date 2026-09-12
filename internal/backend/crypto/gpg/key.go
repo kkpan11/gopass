@@ -3,6 +3,7 @@ package gpg
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -60,34 +61,31 @@ func (k Key) IsUseable(alwaysTrust bool) bool {
 }
 
 // String implement fmt.Stringer. This method produces output that is close to, but
-// not exactly the same, as the output form GPG itself.
+// not exactly the same, as the output from GPG itself.
 func (k Key) String() string {
-	fp := ""
-	if len(k.Fingerprint) > 24 {
-		fp = k.Fingerprint[24:]
-	}
-
-	out := fmt.Sprintf("%s   %dD/0x%s %s", k.KeyType, k.KeyLength, fp, k.CreationDate.Format("2006-01-02"))
+	var out strings.Builder
+	fmt.Fprintf(&out, "%s   %dD/%s %s", k.KeyType, k.KeyLength, k.ID(), k.CreationDate.Format("2006-01-02"))
 	if !k.ExpirationDate.IsZero() {
-		out += fmt.Sprintf(" [expires: %s]", k.ExpirationDate.Format("2006-01-02"))
+		fmt.Fprintf(&out, " [expires: %s]", k.ExpirationDate.Format("2006-01-02"))
 	}
 
-	out += "\n      Key fingerprint = " + k.Fingerprint
+	out.WriteString("\n      Key fingerprint = " + k.Fingerprint)
 	for _, id := range k.Identities {
-		out += fmt.Sprintf("\n" + id.String())
+		fmt.Fprintf(&out, "\n%s", id)
 	}
 
-	return out
+	return out.String()
 }
 
 // OneLine prints a terse representation of this key on one line (includes only
 // the first identity!).
 func (k Key) OneLine() string {
-	if len(k.Fingerprint) < 24 {
+	id := k.ID()
+	if id == "" {
 		return fmt.Sprintf("(invalid:%s)", k.Fingerprint)
 	}
 
-	return fmt.Sprintf("0x%s - %s", k.Fingerprint[24:], k.Identity().ID())
+	return fmt.Sprintf("%s - %s", id, k.Identity().ID())
 }
 
 // Identity returns the first identity.
@@ -98,7 +96,11 @@ func (k Key) Identity() Identity {
 	}
 
 	sort.Slice(ids, func(i, j int) bool {
-		return ids[i].CreationDate.After(ids[j].CreationDate)
+		if !ids[i].CreationDate.Equal(ids[j].CreationDate) {
+			return ids[i].CreationDate.After(ids[j].CreationDate)
+		}
+
+		return ids[i].UID < ids[j].UID
 	})
 
 	for _, i := range ids {
@@ -110,9 +112,15 @@ func (k Key) Identity() Identity {
 
 // ID returns the short fingerprint.
 func (k Key) ID() string {
-	if len(k.Fingerprint) < 25 {
-		return ""
+	if len(k.Fingerprint) == 64 {
+		return fmt.Sprintf("0x%s", k.Fingerprint[:16])
+	}
+	if len(k.Fingerprint) >= 40 {
+		return fmt.Sprintf("0x%s", k.Fingerprint[len(k.Fingerprint)-16:])
+	}
+	if len(k.Fingerprint) >= 24 {
+		return fmt.Sprintf("0x%s", k.Fingerprint[24:])
 	}
 
-	return fmt.Sprintf("0x%s", k.Fingerprint[24:])
+	return ""
 }

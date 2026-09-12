@@ -1,3 +1,7 @@
+// Package cli provides a pinentry client that uses the terminal
+// for input and output. It is a drop-in replacement for the
+// pinentry program. It is used to ask for a passphrase or PIN
+// in the terminal.
 package cli
 
 import (
@@ -7,7 +11,7 @@ import (
 	"github.com/gopasspw/gopass/pkg/termio"
 )
 
-// Client is pinentry CLI drop-in.
+// Client is a pinentry CLI drop-in.
 type Client struct {
 	repeat bool
 }
@@ -31,12 +35,18 @@ func (c *Client) Option(string) error {
 	return nil
 }
 
-// GetPIN prompts for the pin in the termnial and returns the output.
-func (c *Client) GetPIN() (string, error) {
-	pw, err := termio.AskForPassword(context.TODO(), "your PIN", c.repeat)
+// GetPINContext prompts for the pin in the terminal and returns the output.
+// The context is only used for tests.
+func (c *Client) GetPINContext(ctx context.Context) (string, error) {
+	pw, err := termio.AskForPassword(ctx, "your PIN", c.repeat)
 	if err != nil {
 		return "", fmt.Errorf("failed to ask for PIN: %w", err)
 	}
 
 	return pw, nil
+}
+
+// GetPIN prompts for the pin in the terminal and returns the output.
+func (c *Client) GetPIN() (string, error) {
+	return c.GetPINContext(context.Background())
 }

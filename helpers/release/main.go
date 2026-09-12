@@ -10,25 +10,26 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"text/template"
 	"time"
 
 	"github.com/blang/semver/v4"
+	"github.com/gopasspw/gopass/helpers/commitmsg"
+	"github.com/gopasspw/gopass/helpers/gitutils"
 )
 
 var (
-	sleep     = time.Second
-	issueRE   = regexp.MustCompile(`#(\d+)\b`)
-	subjectRE = regexp.MustCompile(`^(\[\w+\]\s+.*)$`)
-	verTmpl   = `package main
+	sleep   = time.Second
+	issueRE = regexp.MustCompile(`#(\d+)\b`)
+	verTmpl = `package main
 
 import (
 	"strings"
@@ -49,7 +50,7 @@ func getVersion() semver.Version {
 		Pre: []semver.PRVersion{
 			{VersionStr: "git"},
 		},
-		Build: []string{"HEAD"},
+		Build: []string{"{{ .Build }}"},
 	}
 }
 `
@@ -65,13 +66,21 @@ const logo = `
 
  `
 
+type releaseArgs struct {
+	nextVersion string
+	prevVersion string
+	dryRun      bool
+}
+
 func main() {
 	fmt.Println(logo)
 	fmt.Println()
 	fmt.Println("🌟 Preparing a new gopass release.")
 	fmt.Println("☝  Checking pre-conditions ...")
 
-	prevVer, nextVer := getVersions()
+	args := parseReleaseArgs(os.Args)
+	prevVer, nextVer := getVersionsForArgs(args)
+	patchRelease := isPatchRelease()
 
 	// - check that workdir is clean
 	if !isGitClean() {
@@ -79,7 +88,7 @@ func main() {
 	}
 	fmt.Println("✅ git is clean")
 
-	if len(nextVer.Pre) < 1 {
+	if !patchRelease {
 		// - check out master
 		if err := gitCoMaster(); err != nil {
 			panic(err)
@@ -90,12 +99,22 @@ func main() {
 			panic(err)
 		}
 		fmt.Println("✅ Fetched changes for master")
+	} else {
+		fmt.Println("✅ PATCH_RELEASE is set, staying on the current branch")
 	}
 	// - check that workdir is clean
 	if !isGitClean() {
 		panic("git is dirty")
 	}
 	fmt.Println("✅ git is still clean")
+
+	if args.dryRun {
+		if err := printDryRun(prevVer, nextVer, patchRelease); err != nil {
+			panic(err)
+		}
+
+		return
+	}
 
 	fmt.Println()
 	fmt.Printf("✅ New version will be: %s\n", nextVer.String())
@@ -104,7 +123,7 @@ func main() {
 	fmt.Scanln()
 
 	// - update deps and run tests
-	if err := updateDeps(); err != nil {
+	if err := releaseTests(); err != nil {
 		panic(err)
 	}
 
@@ -171,14 +190,12 @@ func main() {
 }
 
 func getVersions() (semver.Version, semver.Version) {
-	nextVerFlag := ""
-	if len(os.Args) > 1 {
-		nextVerFlag = strings.TrimSpace(strings.TrimPrefix(os.Args[1], "v"))
-	}
-	prevVerFlag := ""
-	if len(os.Args) > 2 {
-		prevVerFlag = strings.TrimSpace(strings.TrimPrefix(os.Args[2], "v"))
-	}
+	return getVersionsForArgs(parseReleaseArgs(os.Args))
+}
+
+func getVersionsForArgs(args releaseArgs) (semver.Version, semver.Version) {
+	nextVerFlag := args.nextVersion
+	prevVerFlag := args.prevVersion
 
 	// obtain the last tagged version from git
 	gitVer, err := gitVersion()
@@ -208,6 +225,15 @@ func getVersions() (semver.Version, semver.Version) {
 	nextVer := prevVer
 	if nextVerFlag != "" {
 		nextVer = semver.MustParse(nextVerFlag)
+		if prevVerFlag == "" && len(nextVer.Pre) > 0 {
+			rcPrevVer, err := gitPreviousVersionFor(nextVer)
+			if err != nil {
+				panic(err)
+			}
+			if rcPrevVer.GT(prevVer) {
+				prevVer = rcPrevVer
+			}
+		}
 		if nextVer.LTE(prevVer) {
 			usage()
 			panic("next version must be greather than the previous version")
@@ -232,24 +258,127 @@ Will use
 `,
 		gitVer,
 		vfVer,
-		prevVerFlag,
 		nextVerFlag,
+		prevVerFlag,
 		prevVer,
 		nextVer)
 
 	return prevVer, nextVer
 }
 
-func updateDeps() error {
-	cmd := exec.Command("make", "upgrade")
-	cmd.Stderr = os.Stderr
+func parseReleaseArgs(args []string) releaseArgs {
+	parsed := releaseArgs{}
+	positionals := make([]string, 0, 2)
 
-	if err := cmd.Run(); err != nil {
+	for _, arg := range args[1:] {
+		if strings.HasPrefix(arg, "-test.") {
+			continue
+		}
+
+		switch arg {
+		case "--dry-run", "-n":
+			parsed.dryRun = true
+		case "--help", "-h":
+			usage()
+			os.Exit(0)
+		default:
+			if strings.HasPrefix(arg, "-") {
+				usage()
+				panic(fmt.Sprintf("unknown flag %q", arg))
+			}
+
+			positionals = append(positionals, strings.TrimSpace(strings.TrimPrefix(arg, "v")))
+		}
+	}
+
+	if len(positionals) > 2 {
+		usage()
+		panic("too many positional arguments")
+	}
+
+	if len(positionals) > 0 {
+		parsed.nextVersion = positionals[0]
+	}
+	if len(positionals) > 1 {
+		parsed.prevVersion = positionals[1]
+	}
+
+	return parsed
+}
+
+func printDryRun(prevVer, nextVer semver.Version, patchRelease bool) error {
+	notes, unrecognised, err := changelogEntries(prevVer)
+	if err != nil {
 		return err
 	}
 
+	mode := "master release"
+	if patchRelease {
+		mode = "patch/cherry-pick release"
+	}
+
+	releaseType := "stable"
+	if len(nextVer.Pre) > 0 {
+		releaseType = "prerelease"
+	}
+
+	upgradeStep := "make upgrade"
+	if os.Getenv("GOPASS_NOUPGRADE") != "" {
+		upgradeStep = "skipped because GOPASS_NOUPGRADE is set"
+	}
+
+	validationStep := "make gha-linux"
 	if sv := os.Getenv("GOPASS_NOTEST"); sv != "" {
-		fmt.Printf("⚠ GOPASS_NOTEST=%v, skipping 'make travis'", sv)
+		validationStep = fmt.Sprintf("skipped because GOPASS_NOTEST=%v", sv)
+	}
+
+	fmt.Println()
+	fmt.Println("🔎 Dry run, stopping before prompts, file writes, or branch creation.")
+	fmt.Printf("Mode: %s\n", mode)
+	fmt.Printf("Release type: %s\n", releaseType)
+	fmt.Printf("Previous version: %s\n", prevVer.String())
+	fmt.Printf("Next version: %s\n", nextVer.String())
+	fmt.Printf("Dependency step: %s\n", upgradeStep)
+	fmt.Printf("Validation step: %s\n", validationStep)
+	fmt.Printf("Would update: %s\n", strings.Join([]string{"VERSION", "version.go", "CHANGELOG.md", "bash.completion", "fish.completion", "zsh.completion", "gopass.1"}, ", "))
+	fmt.Printf("Would create branch: release/v%s\n", nextVer.String())
+	fmt.Printf("Would create commit: Tag v%s\n", nextVer.String())
+	fmt.Printf("Would later tag and push: v%s\n", nextVer.String())
+	fmt.Println()
+	fmt.Println("Planned changelog entries:")
+
+	if len(notes) < 1 {
+		fmt.Println("- none")
+	}
+
+	// Group by section so the dry run shows exactly the shape that will be
+	// written, rather than a flat list the release then rearranges.
+	for _, sec := range commitmsg.Sections {
+		var printed bool
+
+		for _, note := range notes {
+			if note.Section != sec {
+				continue
+			}
+
+			if !printed {
+				fmt.Printf("\n### %s\n", sec)
+
+				printed = true
+			}
+
+			fmt.Printf("- %s\n", note.Text)
+		}
+	}
+
+	reportUnrecognised(unrecognised)
+
+	return nil
+}
+
+func releaseTests() error {
+	if sv := os.Getenv("GOPASS_NOTEST"); sv != "" {
+		fmt.Printf("⚠ GOPASS_NOTEST=%v, skipping 'make gha-linux'\n", sv)
 
 		return nil
 	}
@@ -261,8 +390,9 @@ func updateDeps() error {
 		return err
 	}
 
-	cmd = exec.Command("make", "travis")
-	cmd.Stderr = os.Stderr
+	fmt.Println("🕑 Running tests with 'make gha-linux', this might take a while. Output is logged to", fn)
+	cmd := exec.Command("make", "gha-linux")
+	cmd.Stderr = io.MultiWriter(fh, os.Stderr)
 	cmd.Stdout = fh
 	cmd.Env = []string{
 		"LANG=en_US.UTF-8",
@@ -280,42 +410,34 @@ func updateDeps() error {
 
 	if err := cmd.Run(); err != nil {
 		_ = fh.Close()
-		fmt.Printf("⚠ 'make travis' failed. Please see the log at %s!", fn)
+		fmt.Printf("⚠ 'make gha-linux' failed. Please see the log at %s!\n", fn)
 
 		return err
 	}
 
 	// remove the log, we don't need it anymore
 	_ = fh.Close()
-	_ = os.RemoveAll(td)
+	_ = os.RemoveAll(fn)
+
+	fmt.Println("✅ Tests passed")
 
 	return nil
 }
 
 func gitCoMaster() error {
-	cmd := exec.Command("git", "checkout", "master")
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
+	return gitutils.GitCoMaster(".")
 }
 
 func gitPom() error {
-	cmd := exec.Command("git", "pull", "origin", "master")
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
+	return gitutils.GitPom(".")
 }
 
 func gitCoRel(v semver.Version) error {
-	cmd := exec.Command("git", "checkout", "-b", "release/v"+v.String())
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
+	return gitutils.GitCoBranch(".", "release/v"+v.String())
 }
 
 func gitCommit(v semver.Version) error {
 	args := []string{
-		"add",
 		"CHANGELOG.md",
 		"VERSION",
 		"version.go",
@@ -325,62 +447,70 @@ func gitCommit(v semver.Version) error {
 		"go.sum",
 		"pkg/pwgen/pwrules/pwrules_gen.go",
 	}
-	cmd := exec.Command("git", args...)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return err
-	}
-
-	cmd = exec.Command("git", "commit", "-s", "-m", "Tag v"+v.String())
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
+	return gitutils.GitCommit(".", "Tag v"+v.String(), args...)
 }
 
 func writeChangelog(prev, next semver.Version) error {
-	cl, err := changelogEntries(prev)
-	if err != nil {
-		panic(err)
-	}
-
-	// prepend the new changelog entries by first writing the
-	// new content in a new file ...
-	fh, err := os.Create("CHANGELOG.new")
+	entries, unrecognised, err := changelogEntries(prev)
 	if err != nil {
 		return err
 	}
-	defer fh.Close()
+
+	reportUnrecognised(unrecognised)
 
 	ofh, err := os.Open("CHANGELOG.md")
 	if err != nil {
 		return err
 	}
-	defer ofh.Close()
 
-	scanner := bufio.NewScanner(ofh)
+	cl, err := parseChangelog(ofh)
+	_ = ofh.Close()
 
-	var written bool
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// insert the new section before the last entry
-		if strings.HasPrefix(line, "## ") && !written {
-			fmt.Fprintf(fh, "## %s / %s\n\n", next.String(), time.Now().UTC().Format("2006-01-02"))
-			for _, e := range cl {
-				fmt.Fprint(fh, "* ")
-				fmt.Fprintln(fh, e)
-			}
-			fmt.Fprintln(fh)
-
-			written = true
-		}
-
-		// all existing lines are just copied over
-		fmt.Fprintln(fh, line)
+	if err != nil {
+		return err
 	}
 
-	// renaming the new file to the old file
+	cl.release(prev, next, time.Now().UTC().Format("2006-01-02"), entries)
+
+	// write the new content to a new file first, then rename over the old one
+	fh, err := os.Create("CHANGELOG.new")
+	if err != nil {
+		return err
+	}
+
+	if err := cl.render(fh); err != nil {
+		_ = fh.Close()
+
+		return err
+	}
+
+	if err := fh.Close(); err != nil {
+		return err
+	}
+
 	return os.Rename("CHANGELOG.new", "CHANGELOG.md")
+}
+
+// reportUnrecognised prints the commit subjects that could not be classified.
+//
+// These are not the same as the deliberately omitted ones. A subject such as
+// "otp: hide --snip flag" uses a scope where a type belongs, so it names a real
+// user-facing change that no section can be chosen for. Printing them is what
+// keeps such a change from disappearing from the release notes unnoticed.
+func reportUnrecognised(subjects []string) {
+	if len(subjects) == 0 {
+		return
+	}
+
+	fmt.Printf("\n⚠ %d commit(s) could not be classified and produced no changelog entry.\n", len(subjects))
+	fmt.Println("  Their subjects are not valid commit messages. See docs/conventions.md.")
+	fmt.Println("  Add a RELEASE_NOTES= line to the commit body, or add the entry by hand:")
+
+	for _, s := range subjects {
+		fmt.Printf("  - %s\n", s)
+	}
+
+	fmt.Println()
 }
 
 func updateCompletion() error {
@@ -405,6 +535,7 @@ type tplPayload struct {
 	Major uint64
 	Minor uint64
 	Patch uint64
+	Build string
 }
 
 func writeVersionGo(v semver.Version) error {
@@ -418,24 +549,21 @@ func writeVersionGo(v semver.Version) error {
 	}
 	defer fh.Close()
 
+	build := "HEAD"
+	if sv, err := gitCommitHash(); err == nil {
+		build = sv
+	}
+
 	return tmpl.Execute(fh, tplPayload{
 		Major: v.Major,
 		Minor: v.Minor,
 		Patch: v.Patch,
+		Build: build,
 	})
 }
 
 func isGitClean() bool {
-	if sv := os.Getenv("GOPASS_FORCE_CLEAN"); sv != "" {
-		return true
-	}
-
-	buf, err := exec.Command("git", "diff", "--stat").CombinedOutput()
-	if err != nil {
-		panic(err)
-	}
-
-	return strings.TrimSpace(string(buf)) == ""
+	return gitutils.IsGitClean(".")
 }
 
 func versionFile() (semver.Version, error) {
@@ -447,23 +575,82 @@ func versionFile() (semver.Version, error) {
 	return semver.Parse(strings.TrimSpace(string(buf)))
 }
 
-func gitVersion() (semver.Version, error) {
-	buf, err := exec.Command("git", "tag", "--sort=version:refname").CombinedOutput()
+func gitCommitHash() (string, error) {
+	buf, err := exec.Command("git", "rev-parse", "--short", "HEAD").CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(string(buf)), nil
+}
+
+func isPatchRelease() bool {
+	return os.Getenv("PATCH_RELEASE") != ""
+}
+
+func gitPreviousVersionFor(next semver.Version) (semver.Version, error) {
+	versions, err := gitVersions()
 	if err != nil {
 		return semver.Version{}, err
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(buf)), "\n")
-	if len(lines) < 1 {
-		return semver.Version{}, fmt.Errorf("no output")
+	for i := len(versions); i > 0; i-- {
+		v := versions[i-1]
+		if v.GTE(next) {
+			continue
+		}
+		if sameReleaseSeries(v, next) {
+			return v, nil
+		}
 	}
 
-	for i := len(lines); i > 0; i-- {
-		sv := strings.TrimPrefix(lines[i-1], "v")
+	return semver.Version{}, nil
+}
+
+func sameReleaseSeries(a, b semver.Version) bool {
+	return a.Major == b.Major && a.Minor == b.Minor && a.Patch == b.Patch
+}
+
+func gitVersions() ([]semver.Version, error) {
+	buf, err := exec.Command("git", "tag", "--sort=version:refname").CombinedOutput()
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(buf)), "\n")
+	if len(lines) < 1 {
+		return nil, fmt.Errorf("no output")
+	}
+
+	versions := make([]semver.Version, 0, len(lines))
+	for _, line := range lines {
+		sv := strings.TrimPrefix(strings.TrimSpace(line), "v")
+		if sv == "" {
+			continue
+		}
 		v, err := semver.Parse(sv)
 		if err != nil {
 			continue
 		}
+
+		versions = append(versions, v)
+	}
+
+	if len(versions) < 1 {
+		return nil, fmt.Errorf("no valid version found")
+	}
+
+	return versions, nil
+}
+
+func gitVersion() (semver.Version, error) {
+	versions, err := gitVersions()
+	if err != nil {
+		return semver.Version{}, err
+	}
+
+	for i := len(versions); i > 0; i-- {
+		v := versions[i-1]
 		if len(v.Pre) > 0 {
 			continue
 		}
@@ -474,7 +661,10 @@ func gitVersion() (semver.Version, error) {
 	return semver.Version{}, fmt.Errorf("no valid version found")
 }
 
-func changelogEntries(since semver.Version) ([]string, error) {
+// changelogEntries collects the changelog entries for every commit since the
+// given version. It returns the classified entries and, separately, the
+// subjects it could not classify, so the caller can report them.
+func changelogEntries(since semver.Version) ([]commitmsg.Entry, []string, error) {
 	// set up a custom output format for the git log command to make it easier to parse here.
 	gitSep := "@@@GIT-SEP@@@"
 	gitDelim := "@@@GIT-DELIM@@@"
@@ -488,13 +678,16 @@ func changelogEntries(since semver.Version) ([]string, error) {
 	}
 	buf, err := exec.Command("git", args...).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("failed to run git %+v with error %w: %s", args, err, string(buf))
+		return nil, nil, fmt.Errorf("failed to run git %+v with error %w: %s", args, err, string(buf))
 	}
 
 	// gitSep separates each commit from the next
-	notes := make([]string, 0, 10)
-	commits := strings.Split(string(buf), gitSep)
-	for _, commit := range commits {
+	entries := make([]commitmsg.Entry, 0, 10)
+
+	var unrecognised []string
+
+	commits := strings.SplitSeq(string(buf), gitSep)
+	for commit := range commits {
 		commit := strings.TrimSpace(commit)
 		if commit == "" {
 			continue
@@ -512,50 +705,74 @@ func changelogEntries(since semver.Version) ([]string, error) {
 
 		subject := strings.TrimSpace(p[1])
 
-		// extract github issue numbers from the subject
-		issues := []string{}
-		if m := issueRE.FindStringSubmatch(strings.TrimSpace(subject)); len(m) > 1 {
-			issues = append(issues, m[1])
-		}
-
-		// try to extract the release note from the subject
-		if m := subjectRE.FindStringSubmatch(subject); len(m) > 1 {
-			notes = append(notes, m[1])
-
-			continue
-		}
-
-		// if no suitable subject was parsed, try to parse the body as well
-		for _, line := range strings.Split(p[2], "\n") {
-			line := strings.TrimSpace(line)
-
-			if m := issueRE.FindStringSubmatch(line); len(m) > 1 {
-				issues = append(issues, m[1])
-			}
-
-			if !strings.HasPrefix(line, "RELEASE_NOTES=") {
-				continue
-			}
-			p := strings.Split(line, "=")
-			if len(p) < 2 {
-				continue
-			}
-			val := p[1]
-			if strings.ToLower(val) == "n/a" {
-				continue
-			}
-			if len(issues) > 0 {
-				val += " (#" + strings.Join(issues, ", #") + ")"
-			}
-			notes = append(notes, val)
+		entry, disp := commitmsg.Classify(subject, p[2])
+		switch disp {
+		case commitmsg.Include:
+			entry.Text = appendIssues(entry.Text, subject, p[2])
+			entries = append(entries, entry)
+		case commitmsg.Unrecognised:
+			unrecognised = append(unrecognised, subject)
+		case commitmsg.Omitted:
+			// deliberately excluded: dependency bumps, CI, docs, tests
 		}
 	}
 
-	sort.Strings(notes)
+	slices.SortFunc(entries, func(a, b commitmsg.Entry) int {
+		if a.Section != b.Section {
+			return slices.Index(commitmsg.Sections, a.Section) - slices.Index(commitmsg.Sections, b.Section)
+		}
 
-	return notes, nil
+		return strings.Compare(a.Text, b.Text)
+	})
+
+	return entries, unrecognised, nil
+}
+
+// appendIssues appends the referenced issue numbers to an entry, unless the
+// text already carries them. A squash-merged subject usually ends in "(#1234)"
+// already, so this only fires for entries whose text came from a
+// RELEASE_NOTES= override or from a body reference.
+func appendIssues(text, subject, body string) string {
+	issues := []string{}
+
+	if m := issueRE.FindStringSubmatch(subject); len(m) > 1 {
+		issues = append(issues, m[1])
+	}
+
+	for line := range strings.SplitSeq(body, "\n") {
+		if m := issueRE.FindStringSubmatch(strings.TrimSpace(line)); len(m) > 1 {
+			issues = append(issues, m[1])
+		}
+	}
+
+	slices.Sort(issues)
+	issues = slices.Compact(issues)
+
+	missing := make([]string, 0, len(issues))
+
+	for _, i := range issues {
+		if strings.Contains(text, "#"+i) {
+			continue
+		}
+		missing = append(missing, i)
+	}
+
+	if len(missing) == 0 {
+		return text
+	}
+
+	return text + " (#" + strings.Join(missing, ", #") + ")"
 }
 
 func usage() {
-	fmt.Printf("Usage: %s [next version] [prev version]\n", "go run helpers/release/main.go")
+	fmt.Printf("Usage: %s [--dry-run] [next version] [prev version]\n", "go run helpers/release/main.go")
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  go run helpers/release/main.go")
+	fmt.Println("  go run helpers/release/main.go --dry-run")
+	fmt.Println("  go run helpers/release/main.go v1.18.2")
+	fmt.Println("  go run helpers/release/main.go v1.19.0-rc.1")
+	fmt.Println("  go run helpers/release/main.go v1.19.0-rc.2 v1.19.0-rc.1")
+	fmt.Println("  go run helpers/release/main.go --dry-run v1.19.0-rc.2")
+	fmt.Println("  PATCH_RELEASE=true go run helpers/release/main.go v1.18.2 v1.17.2")
 }

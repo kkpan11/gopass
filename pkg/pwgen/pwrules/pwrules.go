@@ -3,7 +3,7 @@ package pwrules
 import (
 	"context"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -14,12 +14,12 @@ import (
 
 var reChars = regexp.MustCompile(`(allowed|required):\s*\[(.*)\](?:;|,)`)
 
-// AllRules returns all rules.
+// AllRules returns all password rules.
 func AllRules() map[string]Rule {
 	return genRules
 }
 
-// LookupRule looks up a rule either directly or through one of it's know
+// LookupRule looks up a rule either directly or through one of its known
 // aliases.
 func LookupRule(ctx context.Context, domain string) (Rule, bool) {
 	r, found := genRules[domain]
@@ -36,7 +36,8 @@ func LookupRule(ctx context.Context, domain string) (Rule, bool) {
 	return Rule{}, false
 }
 
-// Rule is a password rule as defined by Apple at https://developer.apple.com/password-rules/
+// Rule is a password rule as defined by Apple.
+// See: https://developer.apple.com/password-rules/
 type Rule struct {
 	Minlen    int
 	Maxlen    int
@@ -65,7 +66,7 @@ func ParseRule(in string) Rule {
 		}
 	}
 
-	for _, part := range strings.Split(strings.TrimSuffix(in, ";"), ";") {
+	for part := range strings.SplitSeq(strings.TrimSuffix(in, ";"), ";") {
 		p := strings.Split(part, ": ")
 		if len(p) < 2 {
 			continue
@@ -75,10 +76,10 @@ func ParseRule(in string) Rule {
 
 		key := strings.TrimSpace(p[0])
 		strVal := strings.TrimSpace(p[1])
-		max := len(strVal)
+		maxVal := len(strVal)
 
 		if i := strings.Index(strVal, "["); i > 0 {
-			max = i
+			maxVal = i
 		}
 
 		switch key {
@@ -89,9 +90,9 @@ func ParseRule(in string) Rule {
 		case "max-consecutive":
 			r.Maxconsec, err = strconv.Atoi(strVal)
 		case "required":
-			r.Required = append(r.Required, strings.Split(strVal[0:max], ",")...)
+			r.Required = append(r.Required, strings.Split(strVal[0:maxVal], ",")...)
 		case "allowed":
-			r.Allowed = append(r.Allowed, strings.Split(strVal[0:max], ",")...)
+			r.Allowed = append(r.Allowed, strings.Split(strVal[0:maxVal], ",")...)
 		}
 
 		if err != nil {
@@ -117,7 +118,7 @@ func sanitize(in []string) []string {
 		out = append(out, v)
 	}
 
-	sort.Strings(out)
+	slices.Sort(out)
 
 	return out
 }

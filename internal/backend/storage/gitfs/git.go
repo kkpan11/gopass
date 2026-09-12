@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/blang/semver/v4"
+	"github.com/gopasspw/gitconfig"
 	"github.com/gopasspw/gopass/internal/backend"
 	"github.com/gopasspw/gopass/internal/backend/storage/fs"
 	"github.com/gopasspw/gopass/internal/out"
@@ -21,7 +22,6 @@ import (
 	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/gopasspw/gopass/pkg/debug"
 	"github.com/gopasspw/gopass/pkg/fsutil"
-	"github.com/gopasspw/gopass/pkg/gitconfig"
 )
 
 type contextKey int
@@ -122,6 +122,12 @@ func Init(ctx context.Context, path, userName, userEmail string) (*Git, error) {
 	// commit if there is something to commit.
 	if !g.HasStagedChanges(ctx) {
 		debug.Log("No staged changes")
+
+		return g, nil
+	}
+
+	if ctxutil.HasSetupRemote(ctx) {
+		debug.Log("Skipping auto-commit during setup with specified remote")
 
 		return g, nil
 	}
@@ -228,7 +234,8 @@ func (g *Git) Add(ctx context.Context, files ...string) error {
 		files[i] = strings.TrimPrefix(files[i], g.fs.Path()+"/")
 	}
 
-	args := []string{"add", "--all", "--force"}
+	args := make([]string, 0, 3+len(files))
+	args = append(args, "add", "--all", "--force")
 	args = append(args, files...)
 
 	return g.Cmd(ctx, "gitAdd", args...)
@@ -265,7 +272,7 @@ func (g *Git) ListUntrackedFiles(ctx context.Context) []string {
 		return []string{fmt.Sprintf("ERROR: %s", err)}
 	}
 	uf := []string{}
-	for _, f := range strings.Split(string(stdout), "\n") {
+	for f := range strings.SplitSeq(string(stdout), "\n") {
 		if f == "" {
 			continue
 		}
@@ -285,7 +292,13 @@ func (g *Git) Commit(ctx context.Context, msg string) error {
 		return store.ErrGitNothingToCommit
 	}
 
-	return g.Cmd(ctx, "gitCommit", "commit", fmt.Sprintf("--date=%d +00:00", ctxutil.GetCommitTimestamp(ctx).UTC().Unix()), "-m", msg)
+	args := []string{"commit", fmt.Sprintf("--date=%d +00:00", ctxutil.GetCommitTimestamp(ctx).UTC().Unix())}
+	// if the message is empty git will open an editor
+	if msg != "" {
+		args = append(args, "-m", msg)
+	}
+
+	return g.Cmd(ctx, "gitCommit", args...)
 }
 
 // TryCommit calls commit and returns nil if there was nothing to commit or if the git repo was not initialized.
@@ -458,7 +471,7 @@ func (g *Git) Revisions(ctx context.Context, name string) ([]backend.Revision, e
 
 	so := string(stdout)
 	revs := make([]backend.Revision, 0, strings.Count(so, "\x1e"))
-	for _, rev := range strings.Split(so, "\x1e") {
+	for rev := range strings.SplitSeq(so, "\x1e") {
 		rev = strings.TrimSpace(rev)
 		if rev == "" {
 			continue

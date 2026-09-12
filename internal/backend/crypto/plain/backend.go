@@ -63,6 +63,7 @@ func (m *Mocker) FindRecipients(ctx context.Context, keys ...string) ([]string, 
 	res := make([]string, 0, len(rs))
 	for _, r := range rs {
 		for _, needle := range keys {
+			debug.V(1).Log("checking recipient %q = %q", r, needle)
 			if strings.HasSuffix(r, needle) {
 				res = append(res, r)
 			}
@@ -113,8 +114,8 @@ func (m *Mocker) Binary() string {
 }
 
 // GenerateIdentity is not implemented.
-func (m *Mocker) GenerateIdentity(ctx context.Context, name, email, pw string) error {
-	return fmt.Errorf("not yet implemented")
+func (m *Mocker) GenerateIdentity(ctx context.Context, name, email, pw string) (string, error) {
+	return "", fmt.Errorf("not yet implemented")
 }
 
 // Fingerprint returns thd id.
@@ -125,6 +126,16 @@ func (m *Mocker) Fingerprint(ctx context.Context, id string) string {
 // FormatKey returns the id.
 func (m *Mocker) FormatKey(ctx context.Context, id, tpl string) string {
 	return id
+}
+
+// FormatKeys returns the IDs.
+func (m *Mocker) FormatKeys(ctx context.Context, ids []string) map[string]string {
+	formatted := make(map[string]string, len(ids))
+	for _, id := range ids {
+		formatted[id] = id
+	}
+
+	return formatted
 }
 
 // Initialized returns nil.
@@ -161,7 +172,22 @@ func (m *Mocker) ReadNamesFromKey(ctx context.Context, buf []byte) ([]string, er
 	return []string{"unsupported"}, nil
 }
 
+// GetFingerprint returns an empty fingerprint.
+func (m *Mocker) GetFingerprint(ctx context.Context, key []byte) (string, error) {
+	return "", nil
+}
+
 // Concurrency returns the number of CPUs.
 func (m *Mocker) Concurrency() int {
 	return runtime.NumCPU()
+}
+
+// NeedsPublicKeyImport returns false because the plain backend has no keyring.
+func (m *Mocker) NeedsPublicKeyImport() bool {
+	return false
+}
+
+// String implements fmt.Stringer.
+func (m *Mocker) String() string {
+	return "Plaintext(Encrypt/Decrypt no-op)"
 }

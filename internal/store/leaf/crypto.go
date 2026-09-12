@@ -8,11 +8,9 @@ import (
 	"path/filepath"
 
 	"github.com/gopasspw/gopass/internal/backend"
-	"github.com/gopasspw/gopass/internal/backend/crypto/age"
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/out"
 	"github.com/gopasspw/gopass/internal/store"
-	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/gopasspw/gopass/pkg/debug"
 )
 
@@ -31,13 +29,83 @@ func (s *Store) Crypto() backend.Crypto {
 	return s.crypto
 }
 
+// recipientCheck checks if a recipient is already present in the keyring and up-to-date.
+// It returns true if the recipient is fine and the import can be skipped.
+//
+// Stage 4 (GH-1430): When FindRecipients returns empty (key expired / unusable
+// in keyring) but the fingerprint matches a key in the store's .public-keys/,
+// this returns false so ImportMissingPublicKeys can re-import the fresh key.
+func (s *Store) recipientCheck(ctx context.Context, r string) bool {
+	// check if this recipient is missing
+	// we could list all keys outside the loop and just do the lookup here
+	// but this way we ensure to use the exact same lookup logic as
+	// gpg does on encryption
+	kl, err := s.crypto.FindRecipients(ctx, r)
+	if err != nil {
+		// this is expected if we don't have the key
+		debug.Log("Failed to get public key for %s: %s", r, err)
+	}
+
+	if len(kl) > 0 { //nolint:nestif
+		debug.Log("Keyring contains %d public keys for %s", len(kl), r)
+		if !IsPubkeyUpdate(ctx) {
+			return true
+		}
+		ex, ok := s.crypto.(keyExporter)
+		if !ok {
+			return true
+		}
+		pk, err := ex.ExportPublicKey(ctx, r)
+		if err != nil {
+			return true
+		}
+		pk2, err2 := s.getPublicKey(ctx, r)
+		if err2 != nil {
+			return true
+		}
+		if bytes.Equal(pk, pk2) {
+			return true
+		}
+	} else {
+		// Key not found in keyring (may be expired/unusable). Try to
+		// look it up by fingerprint from the .public-keys/ copy.
+		pk, err := s.getPublicKey(ctx, r)
+		if err != nil {
+			debug.Log("failed to get public key for %s: %s", r, err)
+
+			return true
+		}
+		fp, err := s.crypto.GetFingerprint(ctx, pk)
+		if err != nil {
+			debug.Log("failed to get fingerprint for %s: %s", r, err)
+
+			return true
+		}
+		kl, err = s.crypto.FindRecipients(ctx, fp)
+		if err != nil {
+			debug.Log("failed to find recipients for %s: %s", fp, err)
+		}
+
+		if len(kl) > 0 {
+			// Stage 4 (GH-1430): key found by fingerprint but
+			// FindRecipients on the original ID returned empty
+			// (e.g. expired). Re-import so the keyring gets the
+			// fresh copy from .public-keys/.
+			debug.Log("key %s with fingerprint %s found in keyring but original ID not usable (expired?); will re-import", r, fp)
+
+			return false
+		}
+	}
+
+	return false
+}
+
 // ImportMissingPublicKeys will try to import any missing public keys from the
 // .public-keys folder in the password store.
 func (s *Store) ImportMissingPublicKeys(ctx context.Context, newrs ...string) error {
-	// do not import any keys for age, where public key == key id
-	// TODO: do not hard code exceptions, ask the backend if it supports it
-	if _, ok := s.crypto.(*age.Age); ok {
-		debug.Log("not importing public keys for age")
+	// only import public keys for backends that manage a separate keyring
+	if !s.crypto.NeedsPublicKeyImport() {
+		debug.Log("not importing public keys for %s (not needed by this backend)", s.crypto.Name())
 
 		return nil
 	}
@@ -50,29 +118,8 @@ func (s *Store) ImportMissingPublicKeys(ctx context.Context, newrs ...string) er
 	ids := append(rs.IDs(), newrs...)
 	for _, r := range ids {
 		debug.Log("Checking recipients %s ...", r)
-		// check if this recipient is missing
-		// we could list all keys outside the loop and just do the lookup here
-		// but this way we ensure to use the exact same lookup logic as
-		// gpg does on encryption
-		kl, err := s.crypto.FindRecipients(ctx, r)
-		if err != nil {
-			// this is expected if we don't have the key
-			debug.Log("Failed to get public key for %s: %s", r, err)
-		}
-
-		if len(kl) > 0 {
-			debug.Log("Keyring contains %d public keys for %s", len(kl), r)
-			if !IsPubkeyUpdate(ctx) {
-				continue
-			}
-			ex, ok := s.crypto.(keyExporter)
-			if ok {
-				pk, err := ex.ExportPublicKey(ctx, r)
-				pk2, err2 := s.getPublicKey(ctx, r)
-				if err == nil && err2 == nil && bytes.Equal(pk, pk2) {
-					continue
-				}
-			}
+		if s.recipientCheck(ctx, r) {
+			continue
 		}
 
 		// get info about this public key
@@ -85,8 +132,8 @@ func (s *Store) ImportMissingPublicKeys(ctx context.Context, newrs ...string) er
 
 		// we need to ask the user before importing
 		// any key material into his keyring!
-		if imf := ctxutil.GetImportFunc(ctx); imf != nil && !config.Bool(ctx, "core.autoimport") {
-			if !imf(ctx, r, names) {
+		if s.importCallback != nil && !config.Bool(ctx, "core.autoimport") {
+			if !s.importCallback(ctx, r, names) {
 				continue
 			}
 		}
@@ -99,7 +146,16 @@ func (s *Store) ImportMissingPublicKeys(ctx context.Context, newrs ...string) er
 
 			continue
 		}
-		out.Printf(ctx, "Imported public key for %s into Keyring", r)
+
+		// Stage 4 (GH-1430): distinguish fresh import from update.
+		// If the key was already in the keyring (FindRecipients returned
+		// empty but fingerprint matched — expired), say "updated".
+		kl, _ := s.crypto.FindRecipients(ctx, r)
+		if len(kl) == 0 {
+			out.Printf(ctx, "Imported public key for %s into Keyring", r)
+		} else {
+			out.Printf(ctx, "Updated public key for %s in Keyring", r)
+		}
 	}
 
 	return nil

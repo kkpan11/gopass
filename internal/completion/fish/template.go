@@ -1,3 +1,4 @@
+// Package fish implements a fish completion template for gopass.
 package fish
 
 // see https://fishshell.com/docs/current/commands.html#complete
@@ -7,7 +8,7 @@ set PROG '{{ $prog }}'
 
 function __fish_{{ $prog }}_needs_command
   set -l cmd (commandline -opc)
-  if [ (count $cmd) -eq 1 -a $cmd[1] = $PROG ]
+  if [ (count $cmd) -eq 1 ] && [ $cmd[1] = $PROG ]
     return 0
   end
   return 1
@@ -28,11 +29,11 @@ function __fish_{{ $prog }}_print_gpg_keys
 end
 
 function __fish_{{ $prog }}_print_entries
-  {{ $prog }} ls --flat
+  {{ $prog }} ls --flat | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g"
 end
 
 function __fish_{{ $prog }}_print_dir
-  for i in ({{ $prog }} ls --flat)
+  for i in ({{ $prog }} ls --flat | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g")
 	  echo (dirname $i)
 	end | sort -u
 end
@@ -49,7 +50,7 @@ complete -c $PROG -f -n '__fish_{{ $prog }}_needs_command' -a {{ .Name }} -d 'Co
 complete -c $PROG -f -n '__fish_{{ $prog }}_uses_command {{ $cmd }}' -a "(__fish_{{ $prog }}_print_entries)"{{ end -}}
 {{- if or (eq $cmd "insert") (eq $cmd "generate") (eq $cmd "list") (eq $cmd "ls") }}
 complete -c $PROG -f -n '__fish_{{ $prog }}_uses_command {{ $cmd }}' -a "(__fish_{{ $prog }}_print_dir)"{{ end -}}
-{{- range .Subcommands }}
+{{- range .Commands }}
 {{- $subcmd := .Name }}
 complete -c $PROG -f -n '__fish_{{ $prog }}_uses_command {{ $cmd }}' -a {{ $subcmd }} -d 'Subcommand: {{ .Usage }}'
 {{- range .Flags }}

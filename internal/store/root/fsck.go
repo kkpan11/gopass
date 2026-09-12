@@ -6,14 +6,15 @@ import (
 	"strings"
 
 	"github.com/gopasspw/gopass/internal/out"
+	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/gopasspw/gopass/pkg/debug"
 )
 
 // Fsck checks all stores/entries matching the given prefix.
-func (s *Store) Fsck(ctx context.Context, store, path string) error {
+func (r *Store) Fsck(ctx context.Context, store, path string, progress ctxutil.ProgressCallback) error {
 	var result []error
 
-	for alias, sub := range s.mounts {
+	for alias, sub := range r.mounts {
 		if sub == nil {
 			continue
 		}
@@ -31,8 +32,8 @@ func (s *Store) Fsck(ctx context.Context, store, path string) error {
 		// check sub store
 		debug.Log("Checking mount point %s", alias)
 
-		if err := sub.Fsck(ctx, path); err != nil {
-			out.Errorf(ctx, "fsck failed on sub store %s: %s", alias, err)
+		if err := sub.Fsck(ctx, path, progress); err != nil {
+			out.Errorf(ctx, "Fsck failed on sub store %s: %s", alias, err)
 			result = append(result, err)
 		}
 
@@ -41,8 +42,8 @@ func (s *Store) Fsck(ctx context.Context, store, path string) error {
 
 	// check root store
 	debug.Log("Checking root store")
-	if err := s.store.Fsck(ctx, path); err != nil {
-		out.Errorf(ctx, "fsck failed on root store: %s", err)
+	if err := r.store.Fsck(ctx, path, progress); err != nil {
+		out.Errorf(ctx, "Fsck failed on root store: %s", err)
 		result = append(result, err)
 	}
 

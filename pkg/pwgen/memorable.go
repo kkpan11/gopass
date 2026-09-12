@@ -4,6 +4,9 @@ import "strings"
 
 // GenerateMemorablePassword will generate a memorable password
 // with a minimum length.
+// It will use a wordlist to generate the password.
+// If symbols is true, it will add symbols to the password.
+// If capitals is true, it will capitalize some words.
 func GenerateMemorablePassword(minLength int, symbols bool, capitals bool) string {
 	var sb strings.Builder
 
@@ -12,7 +15,8 @@ func GenerateMemorablePassword(minLength int, symbols bool, capitals bool) strin
 	for sb.Len() < minLength {
 		// when requesting uppercase, we randomly uppercase words
 		if capitals && randomInteger(2) == 0 {
-			sb.WriteString(strings.Title(randomWord()))
+			// We control the input so we can safely ignore the linter.
+			sb.WriteString(strings.Title(randomWord())) //nolint:staticcheck
 
 			upper = true
 		} else {
@@ -31,7 +35,7 @@ func GenerateMemorablePassword(minLength int, symbols bool, capitals bool) strin
 	if capitals && !upper {
 		str := sb.String()
 
-		return strings.Title(string(str[0])) + str[1:]
+		return strings.Title(string(str[0])) + str[1:] //nolint:staticcheck
 	}
 
 	return sb.String()

@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/gopasspw/gopass/internal/set"
+	"github.com/gopasspw/gopass/pkg/set"
 )
 
 type fossilStatus struct {
@@ -26,7 +26,7 @@ func (f *Fossil) getStatus(ctx context.Context) (fossilStatus, error) {
 		Edited:    set.New[string](),
 		Unchanged: set.New[string](),
 	}
-	for _, line := range strings.Split(string(stdout), "\n") {
+	for line := range strings.SplitSeq(string(stdout), "\n") {
 		op, file, found := strings.Cut(line, " ")
 		if !found {
 			continue

@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 package notify
 
@@ -31,7 +30,7 @@ func Notify(ctx context.Context, subj, msg string) error {
 	if call.Err != nil {
 		debug.Log("DBus notification failure: %s", call.Err)
 
-		return err
+		return call.Err
 	}
 
 	return nil

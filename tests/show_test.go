@@ -22,7 +22,7 @@ func TestShow(t *testing.T) {
 	t.Run("test usage", func(t *testing.T) {
 		out, err := ts.run("show")
 		require.Error(t, err)
-		assert.Equal(t, "\nError: Usage: "+filepath.Base(ts.Binary)+" show [name]\n", out)
+		assert.Equal(t, "Usage: "+filepath.Base(ts.Binary)+" show [name]\n", out)
 	})
 
 	t.Run("test show with non-existing secret", func(t *testing.T) {
@@ -150,5 +150,22 @@ func TestShow(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "aaaaa", out)
 		assert.NotContains(t, out, "\n\n")
+	})
+
+	t.Run("show with hidden-keys config", func(t *testing.T) {
+		_, err = ts.runCmd([]string{ts.Binary, "insert", "fixed/custom-fields"}, []byte("my-password\napi_token: supersecret\nusername: alice"))
+		require.NoError(t, err)
+
+		_, err = ts.run("config show.safecontent true")
+		require.NoError(t, err)
+
+		_, err = ts.run("config show.hidden-keys api_token")
+		require.NoError(t, err)
+
+		out, err := ts.run("show fixed/custom-fields")
+		require.NoError(t, err)
+		assert.Contains(t, out, "api_token: *****")
+		assert.NotContains(t, out, "supersecret")
+		assert.Contains(t, out, "username: alice")
 	})
 }

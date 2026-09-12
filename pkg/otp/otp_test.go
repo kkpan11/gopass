@@ -23,10 +23,10 @@ func TestCalculate(t *testing.T) {
 
 	testCases := [][]byte{
 		[]byte(totpSecret),
-		[]byte(fmt.Sprintf("%s\ntotp: %s", pw, totpSecret)),
-		[]byte(fmt.Sprintf("%s\n---\ntotp: %s", pw, totpSecret)),
-		[]byte(fmt.Sprintf("%s\n%s", pw, totpURL)),
-		[]byte(fmt.Sprintf("%s\n---\n%s", pw, totpURL)),
+		fmt.Appendf(nil, "%s\ntotp: %s", pw, totpSecret),
+		fmt.Appendf(nil, "%s\n---\ntotp: %s", pw, totpSecret),
+		fmt.Appendf(nil, "%s\n%s", pw, totpURL),
+		fmt.Appendf(nil, "%s\n---\n%s", pw, totpURL),
 	}
 
 	for _, tc := range testCases {
@@ -62,17 +62,17 @@ func TestGetOTPURL(t *testing.T) {
 	}{
 		{
 			name: "url-only-in-body",
-			sec:  secparse.MustParse(fmt.Sprintf("%s\n%s", pw, totpURL)),
+			sec:  secparse.MustParse(t, fmt.Sprintf("%s\n%s", pw, totpURL)),
 			url:  totpURL,
 		},
 		{
 			name: "url-and-other-text-in-body",
-			sec:  secparse.MustParse(fmt.Sprintf("%s\n%s\nfoo bar\nbaz\n", pw, totpURL)),
+			sec:  secparse.MustParse(t, fmt.Sprintf("%s\n%s\nfoo bar\nbaz\n", pw, totpURL)),
 			url:  totpURL,
 		},
 		{
 			name: "url-in-kvp",
-			sec:  secparse.MustParse(fmt.Sprintf("%s\notpauth: %s\nfoo bar\nbaz\n", pw, totpURL)),
+			sec:  secparse.MustParse(t, fmt.Sprintf("%s\notpauth: %s\nfoo bar\nbaz\n", pw, totpURL)),
 			url:  totpURL,
 		},
 	} {

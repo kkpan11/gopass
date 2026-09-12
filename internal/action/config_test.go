@@ -9,6 +9,7 @@ import (
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/out"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
+	"github.com/gopasspw/gopass/pkg/fsutil"
 	"github.com/gopasspw/gopass/tests/gptest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,18 +37,23 @@ func TestConfig(t *testing.T) {
 		defer buf.Reset()
 
 		c := gptest.CliCtx(ctx, t)
-		require.NoError(t, act.Config(c))
-		want := `core.autoimport = true
+		require.NoError(t, act.Config(ctx, c))
+		want := `age.agent-enabled = false
+age.agent-timeout = 0
+core.autoimport = true
 core.autopush = true
 core.autosync = true
+core.casefold = false
 core.cliptimeout = 45
 core.exportkeys = true
+core.follow-references = false
 core.nopager = true
 core.notifications = true
 generate.autoclip = true
 `
-		want += "mounts.path = " + u.StoreDir("") + "\n" +
-			"pwgen.xkcd-lang = en\n"
+		want += "mounts.path = " + fsutil.ShrinkPath(u.StoreDir("")) + "\n" +
+			"pwgen.xkcd-lang = en\n" +
+			"show.fuzzysearch = true\n"
 		assert.Equal(t, want, buf.String())
 	})
 
@@ -79,17 +85,22 @@ generate.autoclip = true
 		defer buf.Reset()
 
 		act.printConfigValues(ctx, "")
-		want := `core.autoimport = true
+		want := `age.agent-enabled = false
+age.agent-timeout = 0
+core.autoimport = true
 core.autopush = true
 core.autosync = true
+core.casefold = false
 core.cliptimeout = 45
 core.exportkeys = true
+core.follow-references = false
 core.nopager = true
 core.notifications = true
 generate.autoclip = true
 `
-		want += "mounts.path = " + u.StoreDir("") + "\n" +
-			"pwgen.xkcd-lang = en\n"
+		want += "mounts.path = " + fsutil.ShrinkPath(u.StoreDir("")) + "\n" +
+			"pwgen.xkcd-lang = en\n" +
+			"show.fuzzysearch = true\n"
 
 		assert.Equal(t, want, buf.String(), "action.printConfigValues")
 	})
@@ -98,7 +109,7 @@ generate.autoclip = true
 		defer buf.Reset()
 
 		c := gptest.CliCtx(ctx, t, "core.autoimport")
-		require.NoError(t, act.Config(c))
+		require.NoError(t, act.Config(ctx, c))
 		assert.Equal(t, "true", strings.TrimSpace(buf.String()))
 	})
 
@@ -106,24 +117,29 @@ generate.autoclip = true
 		defer buf.Reset()
 
 		c := gptest.CliCtx(ctx, t, "core.autoimport", "false")
-		require.NoError(t, act.Config(c))
+		require.NoError(t, act.Config(ctx, c))
 		assert.Equal(t, "false", strings.TrimSpace(buf.String()))
 	})
 
 	t.Run("complete config items", func(t *testing.T) {
 		defer buf.Reset()
 
-		act.ConfigComplete(gptest.CliCtx(ctx, t))
-		want := `core.autoimport
+		act.ConfigComplete(ctx, gptest.CliCtx(ctx, t))
+		want := `age.agent-enabled
+age.agent-timeout
+core.autoimport
 core.autopush
 core.autosync
+core.casefold
 core.cliptimeout
 core.exportkeys
+core.follow-references
 core.nopager
 core.notifications
 generate.autoclip
 mounts.path
 pwgen.xkcd-lang
+show.fuzzysearch
 `
 		assert.Equal(t, want, buf.String())
 	})
@@ -132,6 +148,6 @@ pwgen.xkcd-lang
 		defer buf.Reset()
 
 		c := gptest.CliCtx(ctx, t, "autoimport", "false", "42")
-		require.Error(t, act.Config(c))
+		require.Error(t, act.Config(ctx, c))
 	})
 }

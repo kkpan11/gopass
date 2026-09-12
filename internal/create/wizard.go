@@ -1,3 +1,4 @@
+// Package create provides a credential creation wizard.
 package create
 
 import (
@@ -15,7 +16,6 @@ import (
 	"github.com/gopasspw/gopass/internal/editor"
 	"github.com/gopasspw/gopass/internal/hook"
 	"github.com/gopasspw/gopass/internal/out"
-	"github.com/gopasspw/gopass/internal/set"
 	"github.com/gopasspw/gopass/internal/store/root"
 	"github.com/gopasspw/gopass/internal/tpl"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
@@ -24,10 +24,11 @@ import (
 	"github.com/gopasspw/gopass/pkg/gopass/secrets"
 	"github.com/gopasspw/gopass/pkg/pwgen"
 	"github.com/gopasspw/gopass/pkg/pwgen/pwrules"
+	"github.com/gopasspw/gopass/pkg/set"
 	"github.com/gopasspw/gopass/pkg/termio"
 	"github.com/martinhoefling/goxkcdpwgen/xkcdpwgen"
-	"github.com/urfave/cli/v2"
-	"gopkg.in/yaml.v3"
+	"github.com/urfave/cli/v3"
+	"go.yaml.in/yaml/v3"
 )
 
 const (
@@ -37,13 +38,16 @@ const (
 // Attribute is a credential attribute that is being asked for
 // when populating a template.
 type Attribute struct {
-	Name         string `yaml:"name"`
-	Type         string `yaml:"type"`
-	Prompt       string `yaml:"prompt"`
-	Charset      string `yaml:"charset"`
-	Min          int    `yaml:"min"`
-	Max          int    `yaml:"max"`
-	AlwaysPrompt bool   `yaml:"always_prompt"` // always prompt for the crendentials
+	Name         string   `yaml:"name"`
+	Type         string   `yaml:"type"`
+	Prompt       string   `yaml:"prompt"`
+	Charset      string   `yaml:"charset"`
+	Min          int      `yaml:"min"`
+	Max          int      `yaml:"max"`
+	AlwaysPrompt bool     `yaml:"always_prompt"` // always prompt for the crendentials
+	Strict       bool     `yaml:"strict"`        // enforce character class rules (all detected classes must be present)
+	Options      []string `yaml:"options"`       // selectable values for the "choice" attribute type
+	Optional     bool     `yaml:"optional"`      // allow skipping a "password" attribute (e.g. SSO / social login accounts)
 }
 
 // Template is an action template for the create wizard.
@@ -101,7 +105,7 @@ func New(ctx context.Context, s backend.Storage) (*Wizard, error) {
 	return w, nil
 }
 
-func (w *Wizard) parseTemplatesFallback(ctx context.Context) ([]Template, error) {
+func (w *Wizard) parseTemplatesFallback(_ context.Context) ([]Template, error) {
 	parsed := []Template{}
 	for _, tpl := range defaultTemplates {
 		t := Template{}
@@ -152,7 +156,7 @@ func (w *Wizard) parseTemplates(ctx context.Context, s backend.Storage) ([]Templ
 }
 
 // ActionCallback is the callback for the creation calls to print and copy the credentials.
-type ActionCallback func(context.Context, *cli.Context, string, string, bool) error
+type ActionCallback func(context.Context, *cli.Command, string, string, bool) error
 
 // Actions returns a list of actions that can be performed on the wizard. The actions directly
 // interact with the underlying storage.
@@ -172,12 +176,12 @@ func (w *Wizard) Actions(s *root.Store, cb ActionCallback) cui.Actions {
 	return acts
 }
 
-func mkActFunc(tpl Template, s *root.Store, cb ActionCallback) func(context.Context, *cli.Context) error { //nolint:cyclop
+func mkActFunc(tpl Template, s *root.Store, cb ActionCallback) func(context.Context, *cli.Command) error { //nolint:cyclop
 	debug.Log("creating action func for %+v, cb: %p", tpl, cb)
 
-	return func(ctx context.Context, c *cli.Context) error {
-		name := c.Args().First()
-		store := c.String("store")
+	return func(ctx context.Context, cmd *cli.Command) error {
+		name := cmd.Args().First()
+		store := cmd.String("store")
 
 		// select store.
 		if store == "" {
@@ -185,7 +189,7 @@ func mkActFunc(tpl Template, s *root.Store, cb ActionCallback) func(context.Cont
 		}
 		ctx = config.WithMount(ctx, store)
 
-		force := c.Bool("force")
+		force := cmd.Bool("force")
 
 		if err := hook.Invoke(ctx, "create.pre-hook", name); err != nil {
 			return err
@@ -225,15 +229,28 @@ func mkActFunc(tpl Template, s *root.Store, cb ActionCallback) func(context.Cont
 				if v.Min > 0 && len(sv) < v.Min {
 					return fmt.Errorf("%s is too short (needs %d)", v.Name, v.Min)
 				}
-				if v.Max > 0 && len(sv) > v.Min {
+				if v.Max > 0 && len(sv) > v.Max {
 					return fmt.Errorf("%s is too long (at most %d)", v.Name, v.Max)
 				}
 				if wantForName[k] {
 					nameParts = append(nameParts, sv)
 				}
 				_ = sec.Set(k, sv)
+			case "choice":
+				if len(v.Options) < 1 {
+					return fmt.Errorf("choice attribute %s has no options", v.Name)
+				}
+				act, sel := cui.GetSelection(ctx, fmtfn(2, strconv.Itoa(step), v.Prompt), v.Options)
+				if act == "aborted" {
+					return exit.Error(exit.Aborted, nil, "user aborted")
+				}
+				choice := v.Options[sel]
+				if wantForName[k] {
+					nameParts = append(nameParts, choice)
+				}
+				_ = sec.Set(k, choice)
 			case "multiline":
-				ed := editor.Path(c)
+				ed := editor.Path(ctx, cmd)
 
 				content, err := renderTemplate(ctx, k, s)
 				if err != nil {
@@ -258,7 +275,7 @@ func mkActFunc(tpl Template, s *root.Store, cb ActionCallback) func(context.Cont
 				}
 				hostname = extractHostname(sv)
 				if hostname == "" {
-					return fmt.Errorf("can not parse URL %s", sv)
+					return fmt.Errorf("cannot parse URL %s", sv)
 				}
 				if wantForName[k] {
 					nameParts = append(nameParts, hostname)
@@ -269,6 +286,20 @@ func mkActFunc(tpl Template, s *root.Store, cb ActionCallback) func(context.Cont
 				_ = sec.Set(k, sv)
 			case "password":
 				var err error
+				// Optional passwords let a single template cover accounts that
+				// authenticate without a stored password (e.g. login via Google /
+				// SSO / social login). When the user declines, we skip prompting
+				// and leave the password empty instead of storing a blank one.
+				if v.Optional {
+					var hasPw bool
+					hasPw, err = termio.AskForBool(ctx, fmtfn(2, strconv.Itoa(step), "Does this account have a password? (No for SSO / social login)"), true)
+					if err != nil {
+						return err
+					}
+					if !hasPw {
+						continue
+					}
+				}
 				if !v.AlwaysPrompt {
 					genPw, err = termio.AskForBool(ctx, fmtfn(2, strconv.Itoa(step), "Generate Password?"), true)
 					if err != nil {
@@ -277,7 +308,7 @@ func mkActFunc(tpl Template, s *root.Store, cb ActionCallback) func(context.Cont
 				}
 
 				if genPw { //nolint:nestif
-					password, err = generatePassword(ctx, hostname, v.Charset)
+					password, err = generatePassword(ctx, hostname, v.Charset, v.Strict)
 					if err != nil {
 						return err
 					}
@@ -289,7 +320,7 @@ func mkActFunc(tpl Template, s *root.Store, cb ActionCallback) func(context.Cont
 					if v.Min > 0 && len(password) < v.Min {
 						return fmt.Errorf("%s is too short (needs %d)", v.Name, v.Min)
 					}
-					if v.Max > 0 && len(password) > v.Min {
+					if v.Max > 0 && len(password) > v.Max {
 						return fmt.Errorf("%s is too long (at most %d)", v.Name, v.Max)
 					}
 				}
@@ -329,12 +360,12 @@ func mkActFunc(tpl Template, s *root.Store, cb ActionCallback) func(context.Cont
 			}
 		}
 
-		if err := s.Set(ctxutil.WithCommitMessage(ctx, "Created new entry"), name, sec); err != nil {
+		if err := s.Set(ctxutil.WithCommitMessage(ctx, "Create new entry"), name, sec); err != nil {
 			return fmt.Errorf("failed to set %q: %w", name, err)
 		}
 		out.OKf(ctx, "Credentials saved to %q", name)
 
-		return cb(ctx, c, name, password, genPw)
+		return cb(ctx, cmd, name, password, genPw)
 	}
 }
 
@@ -362,7 +393,7 @@ func renderTemplate(ctx context.Context, name string, s *root.Store) ([]byte, er
 }
 
 // generatePassword will walk through the password generation steps.
-func generatePassword(ctx context.Context, hostname, charset string) (string, error) {
+func generatePassword(ctx context.Context, hostname, charset string, strict bool) (string, error) {
 	defaultLength, _ := config.DefaultPasswordLengthFromEnv(ctx)
 
 	if charset != "" {
@@ -371,8 +402,13 @@ func generatePassword(ctx context.Context, hostname, charset string) (string, er
 			return "", err
 		}
 
+		if strict {
+			return pwgen.GeneratePasswordCharsetStrict(length, charset)
+		}
+
 		return pwgen.GeneratePasswordCharset(length, charset), nil
 	}
+
 	if _, found := pwrules.LookupRule(ctx, hostname); found {
 		out.Noticef(ctx, "Using password rules for %s ...", hostname)
 		length, err := termio.AskForInt(ctx, fmtfn(4, "b", "How long?"), defaultLength)
@@ -382,21 +418,13 @@ func generatePassword(ctx context.Context, hostname, charset string) (string, er
 
 		return pwgen.NewCrypticForDomain(ctx, length, hostname).Password(), nil
 	}
+
 	xkcd, err := termio.AskForBool(ctx, fmtfn(4, "a", "Human-pronounceable passphrase?"), false)
 	if err != nil {
 		return "", err
 	}
 	if xkcd {
-		length, err := termio.AskForInt(ctx, fmtfn(4, "b", "How many words?"), config.DefaultXKCDLength)
-		if err != nil {
-			return "", err
-		}
-		g := xkcdpwgen.NewGenerator()
-		g.SetNumWords(length)
-		g.SetDelimiter(" ")
-		g.SetCapitalize(true)
-
-		return string(g.GeneratePassword()), nil
+		return generatePasswordXKCD(ctx)
 	}
 
 	length, err := termio.AskForInt(ctx, fmtfn(4, "b", "How long?"), defaultLength)
@@ -404,12 +432,12 @@ func generatePassword(ctx context.Context, hostname, charset string) (string, er
 		return "", err
 	}
 
-	symbols, err := termio.AskForBool(ctx, fmtfn(4, "c", "Include symbols?"), false)
+	symbols, err := termio.AskForBool(ctx, fmtfn(4, "c", "Include symbols?"), config.Bool(ctx, "generate.symbols"))
 	if err != nil {
 		return "", err
 	}
 
-	corp, err := termio.AskForBool(ctx, fmtfn(4, "d", "Strict rules?"), false)
+	corp, err := termio.AskForBool(ctx, fmtfn(4, "d", "Strict rules?"), config.Bool(ctx, "generate.strict"))
 	if err != nil {
 		return "", err
 	}
@@ -418,4 +446,32 @@ func generatePassword(ctx context.Context, hostname, charset string) (string, er
 	}
 
 	return pwgen.GeneratePassword(length, symbols), nil
+}
+
+func generatePasswordXKCD(ctx context.Context) (string, error) {
+	length, err := termio.AskForInt(ctx, fmtfn(4, "b", "How many words?"), config.Int(ctx, "pwgen.xkcd-len"))
+	if err != nil {
+		return "", err
+	}
+	if length < 1 {
+		length = config.DefaultXKCDLength
+	}
+
+	g := xkcdpwgen.NewGenerator()
+	g.SetNumWords(length)
+
+	if sv := config.String(ctx, "pwgen.xkcd-sep"); sv != "" {
+		g.SetDelimiter(sv)
+	}
+
+	g.SetCapitalize(config.Bool(ctx, "pwgen.xkcd-capitalize"))
+	g.SetRandomNumbers(config.Bool(ctx, "pwgen.xkcd-numbers"))
+
+	if sv := config.String(ctx, "pwgen.xkcd-lang"); sv != "" {
+		if err := g.UseLangWordlist(sv); err != nil {
+			return "", fmt.Errorf("failed to use wordlist for lang %s: %w", sv, err)
+		}
+	}
+
+	return g.GeneratePasswordString(), nil
 }

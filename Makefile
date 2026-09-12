@@ -11,7 +11,7 @@ ZSH_COMPLETION_OUTPUT     := zsh.completion
 CLIPHELPERS               ?= ""
 # Support reproducible builds by embedding date according to SOURCE_DATE_EPOCH if present
 DATE                      := $(shell date -u -d "@$(SOURCE_DATE_EPOCH)" '+%FT%T%z' 2>/dev/null || date -u '+%FT%T%z')
-BUILDFLAGS_NOPIE          := -tags=netgo -trimpath -ldflags="-s -w -X main.version=$(GOPASS_VERSION) -X main.commit=$(GOPASS_REVISION) -X main.date=$(DATE) $(CLIPHELPERS)" -gcflags="-trimpath=$(GOPATH)" -asmflags="-trimpath=$(GOPATH)"
+BUILDFLAGS_NOPIE          := -buildvcs=true -tags=netgo -trimpath -ldflags="-s -w -X main.version=$(GOPASS_VERSION) -X main.commit=$(GOPASS_REVISION) -X main.date=$(DATE) $(CLIPHELPERS)" -gcflags="-trimpath=$(GOPATH)" -asmflags="-trimpath=$(GOPATH)"
 BUILDFLAGS                ?= $(BUILDFLAGS_NOPIE) -buildmode=pie
 TESTFLAGS                 ?=
 PWD                       := $(shell pwd)
@@ -28,9 +28,9 @@ OK := $(shell tput setaf 6; echo ' [OK]'; tput sgr0;)
 all: sysinfo build
 build: $(GOPASS_OUTPUT)
 completion: $(BASH_COMPLETION_OUTPUT) $(FISH_COMPLETION_OUTPUT) $(ZSH_COMPLETION_OUTPUT)
-travis: sysinfo crosscompile build fulltest completion codequality
-travis-osx: sysinfo build test completion
-travis-windows: sysinfo build test-win completion
+gha-linux: sysinfo licensecheck crosscompile build fulltest completion
+gha-osx: sysinfo build test completion
+gha-windows: sysinfo build test-win completion
 
 sysinfo:
 	@echo ">> SYSTEM INFORMATION"
@@ -51,6 +51,7 @@ sysinfo:
 
 clean:
 	@echo -n ">> CLEAN"
+	@rm -rf vendor/
 	@$(GO) clean -i ./...
 	@rm -f ./coverage-all.html
 	@rm -f ./coverage-all.out
@@ -119,7 +120,7 @@ test-integration: $(GOPASS_OUTPUT)
 crosscompile:
 	@echo ">> CROSSCOMPILE"
 	@which goreleaser > /dev/null; if [ $$? -ne 0 ]; then \
-		$(GO) install github.com/goreleaser/goreleaser@latest; \
+		$(GO) install github.com/goreleaser/goreleaser/v2@v2.11.2; \
 	fi
 	@goreleaser build --snapshot
 
@@ -128,18 +129,44 @@ crosscompile:
 	@./gopass completion $* > $@
 	@printf "%s\n" "$(OK)"
 
-codequality:
+codequality: licensecheck
 	@echo ">> CODE QUALITY"
 
 	@echo -n "     GOLANGCI-LINT "
 	@which golangci-lint > /dev/null; if [ $$? -ne 0 ]; then \
-		$(GO) install github.com/golangci/golangci-lint/cmd/golangci-lint@latest; \
+		$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1; \
 	fi
-	@golangci-lint run --max-issues-per-linter 0 --max-same-issues 0 --sort-results || exit 1
-
+	@golangci-lint run --max-issues-per-linter 0 --max-same-issues 0 || exit 1
 	@printf '%s\n' '$(OK)'
 
-	@echo -n "     LICENSE-LINT "
+	@echo -n "     KEEP-SORTED   "
+	@which keep-sorted > /dev/null; if [ $$? -ne 0 ]; then \
+		$(GO) install github.com/google/keep-sorted@latest; \
+	fi
+	@keep-sorted --mode lint $(GOFILES_NOVENDOR) || exit 1
+	@printf '%s\n' '$(OK)'
+
+	@echo -n "     CAPSLOCK      "
+	@which capslock > /dev/null; if [ $$? -ne 0 ]; then \
+		$(GO) install github.com/google/capslock/cmd/capslock@latest; \
+	fi
+	@capslock -packages ./... -output=compare .capabilities.json || exit 1
+	@printf '%s\n' '$(OK)'
+
+	@echo -n "     GOVULNCHECK   "
+	@which govulncheck > /dev/null; if [ $$? -ne 0 ]; then \
+		$(GO) install golang.org/x/vuln/cmd/govulncheck@latest; \
+	fi
+	@govulncheck >/dev/null || exit 1
+	@printf '%s\n' '$(OK)'
+
+update-caps:
+	@capslock -packages ./... -output json >.capabilities.json
+
+licensecheck:
+	@echo ">> LICENSE CHECK"
+
+	@echo -n "     LICENSE-LINT  "
 	@which license-lint > /dev/null; if [ $$? -ne 0 ]; then \
 		$(GO) install istio.io/tools/cmd/license-lint@latest; \
 	fi
@@ -151,8 +178,8 @@ gen:
 	@$(GO) generate ./...
 
 fmt:
-	@gofumpt -s -l -w $(GOFILES_NOVENDOR)
-	@gci write $(GOFILES_NOVENDOR)
+	@keep-sorted --mode fix $(GOFILES_NOVENDOR)
+	@gofumpt -w $(GOFILES_NOVENDOR)
 	@$(GO) mod tidy
 
 deps:
@@ -161,6 +188,9 @@ deps:
 upgrade: gen fmt
 	@$(GO) get -u ./...
 	@$(GO) mod tidy
+
+fix:
+	@$(GO) fix ./...
 
 man:
 	@$(GO) run helpers/man/main.go > gopass.1

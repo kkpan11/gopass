@@ -7,29 +7,43 @@ import (
 	"github.com/gopasspw/gopass/internal/action/exit"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/gopasspw/gopass/pkg/termio"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // Copy the contents of a file to another one.
-func (s *Action) Copy(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
-	force := c.Bool("force")
+func (s *secretHandler) Copy(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	force := cmd.Bool("force")
 
-	if c.Args().Len() != 2 {
+	if cmd.Args().Len() != 2 {
 		return exit.Error(exit.Usage, nil, "Usage: %s cp <FROM> <TO>", s.Name)
 	}
 
-	from := c.Args().Get(0)
-	to := c.Args().Get(1)
+	from := cmd.Args().Get(0)
+	to := cmd.Args().Get(1)
+
+	// Check for custom commit message
+	commitMsg := fmt.Sprintf("Copy %s to %s", from, to)
+	if cmd.IsSet("commit-message") {
+		commitMsg = cmd.String("commit-message")
+	}
+	if cmd.Bool("interactive-commit") {
+		commitMsg = ""
+	}
+	ctx = ctxutil.WithCommitMessage(ctx, commitMsg)
 
 	return s.copy(ctx, from, to, force)
 }
 
-func (s *Action) copy(ctx context.Context, from, to string, force bool) error {
+func (s *secretHandler) copy(ctx context.Context, from, to string, force bool) error {
 	if !s.Store.Exists(ctx, from) && !s.Store.IsDir(ctx, from) {
 		return exit.Error(exit.NotFound, nil, "%s does not exist", from)
 	}
 
+	return s.copyRegular(ctx, from, to, force)
+}
+
+func (s *secretHandler) copyRegular(ctx context.Context, from, to string, force bool) error {
 	if !force {
 		if s.Store.Exists(ctx, to) && !termio.AskForConfirmation(ctx, fmt.Sprintf("%s already exists. Overwrite it?", to)) {
 			return exit.Error(exit.Aborted, nil, "not overwriting your current secret")

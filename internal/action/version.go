@@ -15,16 +15,16 @@ import (
 	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/gopasspw/gopass/pkg/debug"
 	"github.com/gopasspw/gopass/pkg/protect"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // Version prints the gopass version.
-func (s *Action) Version(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
+func (s *miscHandler) Version(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
 	version := make(chan string, 1)
 	go s.checkVersion(ctx, version)
 
-	cli.VersionPrinter(c)
+	cli.VersionPrinter(cmd)
 
 	select {
 	case vi := <-version:
@@ -40,7 +40,7 @@ func (s *Action) Version(c *cli.Context) error {
 	return nil
 }
 
-func (s *Action) checkVersion(ctx context.Context, u chan string) {
+func (s *miscHandler) checkVersion(ctx context.Context, u chan string) {
 	msg := ""
 	defer func() {
 		u <- msg
@@ -84,7 +84,7 @@ func (s *Action) checkVersion(ctx context.Context, u chan string) {
 		return
 	}
 
-	if s.version.GTE(r.Version) {
+	if !r.Version.GT(s.version) {
 		_ = s.rem.Reset("update")
 		debug.Log("gopass is up-to-date (local: %q, GitHub: %q)", s.version, r.Version)
 

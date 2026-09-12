@@ -1,3 +1,5 @@
+// Package xkcdgen provides a simple wrapper around the xkcdpwgen
+// package to generate random passphrases.
 package xkcdgen
 
 import (
@@ -13,7 +15,7 @@ func Random() string {
 	return password
 }
 
-// RandomLength returns a random passphrase combined from the desired number.
+// RandomLength returns a random passphrase combined from the desired number
 // of words. Words are drawn from lang.
 func RandomLength(length int, lang string) (string, error) {
 	return RandomLengthDelim(length, " ", lang, false, false)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gopasspw/gopass/internal/backend/crypto/gpg"
@@ -112,6 +113,12 @@ func (g *GPG) Concurrency() int {
 	return 1
 }
 
+// NeedsPublicKeyImport returns true because GPG manages public keys in a
+// local keyring that must be populated by importing keys.
+func (g *GPG) NeedsPublicKeyImport() bool {
+	return true
+}
+
 // Binary returns the GPG binary location.
 func (g *GPG) Binary() string {
 	if g == nil {
@@ -119,4 +126,22 @@ func (g *GPG) Binary() string {
 	}
 
 	return g.binary
+}
+
+// String implements fmt.Stringer.
+func (g *GPG) String() string {
+	var sb strings.Builder
+	sb.WriteString("gpgcli(")
+	if g == nil {
+		sb.WriteString("<nil>)")
+
+		return sb.String()
+	}
+	sb.WriteString("binary:")
+	sb.WriteString(g.binary)
+	sb.WriteString(",args: [")
+	sb.WriteString(strings.Join(g.args, " "))
+	sb.WriteString("])")
+
+	return sb.String()
 }

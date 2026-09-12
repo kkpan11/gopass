@@ -45,7 +45,7 @@ func TestYAMLKeyFromEmptySecret(t *testing.T) {
 
 	v, ok := s.Get(yamlKey)
 	assert.False(t, ok)
-	assert.Equal(t, "", v)
+	assert.Empty(t, v)
 }
 
 type inlineB struct {
@@ -68,7 +68,7 @@ func TestYAMLEncodingError(t *testing.T) {
 			}{1, inlineB{2, inlineC{3}}},
 		},
 	}
-	assert.Equal(t, "", string(s.Bytes()))
+	assert.Empty(t, string(s.Bytes()))
 }
 
 func TestYAMLKeyToEmptySecret(t *testing.T) {
@@ -83,7 +83,7 @@ func TestYAMLKeyToEmptySecret(t *testing.T) {
 	// read back key
 	v, ok := s.Get(yamlKey)
 	assert.True(t, ok)
-	assert.Equal(t, yamlValue, v)
+	assert.YAMLEq(t, yamlValue, v)
 
 	// read back whole entry
 	want := "\n---\n" + yamlKey + ": " + yamlValue + "\n"
@@ -155,17 +155,17 @@ func TestYAMLSetMultipleKeys(t *testing.T) {
 	}
 
 	// read back the password
-	assert.Equal(t, yamlPassword, s.Password())
+	assert.YAMLEq(t, yamlPassword, s.Password())
 
 	// read back the keys
 	for _, key := range keys {
 		v, ok := s.Get(key)
 		assert.True(t, ok)
-		assert.Equal(t, yamlValue, v)
+		assert.YAMLEq(t, yamlValue, v)
 	}
 
 	// read back whole entry
-	assert.Equal(t, b.String(), string(s.Bytes()))
+	assert.YAMLEq(t, b.String(), string(s.Bytes()))
 }
 
 func TestYAMLMultilineWithDashes(t *testing.T) {

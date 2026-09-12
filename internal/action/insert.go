@@ -17,18 +17,19 @@ import (
 	"github.com/gopasspw/gopass/pkg/gopass"
 	"github.com/gopasspw/gopass/pkg/gopass/secrets"
 	"github.com/gopasspw/gopass/pkg/termio"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // Insert a string as content to a secret file.
-func (s *Action) Insert(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
-	echo := c.Bool("echo")
-	multiline := c.Bool("multiline")
-	force := c.Bool("force")
-	appending := c.Bool("append")
+func (s *secretHandler) Insert(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	echo := cmd.Bool("echo")
+	multiline := cmd.Bool("multiline")
+	force := cmd.Bool("force")
+	appending := cmd.Bool("append")
+	ctx = ctxutil.WithForce(ctx, force)
 
-	args, kvps := parseArgs(c)
+	args, kvps := parseArgs(ctx, cmd)
 	name := args.Get(0)
 	key := args.Get(1)
 
@@ -36,11 +37,21 @@ func (s *Action) Insert(c *cli.Context) error {
 		return exit.Error(exit.NoName, nil, "Usage: %s insert name", s.Name)
 	}
 
-	return s.insert(ctx, c, name, key, echo, multiline, force, appending, kvps)
+	return s.insert(ctx, cmd, name, key, echo, multiline, force, appending, kvps)
 }
 
-func (s *Action) insert(ctx context.Context, c *cli.Context, name, key string, echo, multiline, force, appending bool, kvps map[string]string) error {
+func (s *secretHandler) insert(ctx context.Context, cmd *cli.Command, name, key string, echo, multiline, force, appending bool, kvps map[string]string) error {
 	var content []byte
+
+	// Check for custom commit message
+	commitMsg := "Insert user supplied password"
+	if cmd.IsSet("commit-message") {
+		commitMsg = cmd.String("commit-message")
+	}
+	if cmd.Bool("interactive-commit") {
+		commitMsg = ""
+	}
+	ctx = ctxutil.WithCommitMessage(ctx, commitMsg)
 
 	// if content is piped to stdin, read and save it.
 	if ctxutil.IsStdin(ctx) {
@@ -73,7 +84,7 @@ func (s *Action) insert(ctx context.Context, c *cli.Context, name, key string, e
 
 	// if multi-line input is requested start an editor.
 	if multiline && ctxutil.IsInteractive(ctx) {
-		return s.insertMultiline(ctx, c, name)
+		return s.insertMultiline(ctx, cmd, name)
 	}
 
 	// if echo mode is requested use a simple string input function.
@@ -91,7 +102,7 @@ func (s *Action) insert(ctx context.Context, c *cli.Context, name, key string, e
 	return s.insertSingle(ctx, name, pw, kvps)
 }
 
-func (s *Action) insertStdin(ctx context.Context, name string, content []byte, appendTo bool) error {
+func (s *secretHandler) insertStdin(ctx context.Context, name string, content []byte, appendTo bool) error {
 	var sec gopass.Secret = secrets.ParseAKV(content)
 
 	if appendTo && s.Store.Exists(ctx, name) {
@@ -102,7 +113,7 @@ func (s *Action) insertStdin(ctx context.Context, name string, content []byte, a
 		}
 	}
 
-	if err := s.Store.Set(ctxutil.WithCommitMessage(ctx, "Read secret from STDIN"), name, sec); err != nil {
+	if err := s.Store.Set(ctx, name, sec); err != nil {
 		if !errors.Is(err, store.ErrMeaninglessWrite) {
 			return exit.Error(exit.Encrypt, err, "failed to set %q: %s", name, err)
 		}
@@ -112,7 +123,7 @@ func (s *Action) insertStdin(ctx context.Context, name string, content []byte, a
 	return nil
 }
 
-func (s *Action) insertStdinAppend(ctx context.Context, name string, content []byte) (gopass.Secret, error) {
+func (s *secretHandler) insertStdinAppend(ctx context.Context, name string, content []byte) (gopass.Secret, error) {
 	eSec, err := s.Store.Get(ctx, name)
 	if err != nil {
 		return nil, exit.Error(exit.Decrypt, err, "failed to decrypt existing secret: %s", err)
@@ -132,7 +143,7 @@ func (s *Action) insertStdinAppend(ctx context.Context, name string, content []b
 	return eSec, nil
 }
 
-func (s *Action) insertSingle(ctx context.Context, name, pw string, kvps map[string]string) error {
+func (s *secretHandler) insertSingle(ctx context.Context, name, pw string, kvps map[string]string) error {
 	sec, err := s.insertGetSecret(ctx, name, pw)
 	if err != nil {
 		return err
@@ -146,7 +157,7 @@ func (s *Action) insertSingle(ctx context.Context, name, pw string, kvps map[str
 		audit.Single(ctx, pw)
 	}
 
-	if err := s.Store.Set(ctxutil.WithCommitMessage(ctx, "Inserted user supplied password"), name, sec); err != nil {
+	if err := s.Store.Set(ctx, name, sec); err != nil {
 		if !errors.Is(err, store.ErrMeaninglessWrite) {
 			return exit.Error(exit.Encrypt, err, "failed to write secret %q: %s", name, err)
 		}
@@ -156,7 +167,7 @@ func (s *Action) insertSingle(ctx context.Context, name, pw string, kvps map[str
 	return nil
 }
 
-func (s *Action) insertGetSecret(ctx context.Context, name, pw string) (gopass.Secret, error) {
+func (s *secretHandler) insertGetSecret(ctx context.Context, name, pw string) (gopass.Secret, error) {
 	if s.Store.Exists(ctx, name) {
 		sec, err := s.Store.Get(ctx, name)
 		if err != nil {
@@ -166,7 +177,7 @@ func (s *Action) insertGetSecret(ctx context.Context, name, pw string) (gopass.S
 		return sec, nil
 	}
 
-	content, found := s.renderTemplate(ctx, name, []byte(pw))
+	content, found := s.renderTemplateFn(ctx, name, []byte(pw))
 	// no template found
 	if !found {
 		return secrets.New(), nil
@@ -184,7 +195,7 @@ func (s *Action) insertGetSecret(ctx context.Context, name, pw string) (gopass.S
 }
 
 // insertYAML will overwrite existing keys.
-func (s *Action) insertYAML(ctx context.Context, name, key string, content []byte, kvps map[string]string) error {
+func (s *secretHandler) insertYAML(ctx context.Context, name, key string, content []byte, kvps map[string]string) error {
 	debug.Log("insertYAML: %s - %s -> %s", name, key, content)
 	if ctxutil.IsInteractive(ctx) {
 		pw, err := termio.AskForString(ctx, name+":"+key, "")
@@ -214,7 +225,7 @@ func (s *Action) insertYAML(ctx context.Context, name, key string, content []byt
 		return exit.Error(exit.Usage, err, "failed set key %q of %q: %q", key, name, err)
 	}
 
-	if err := s.Store.Set(ctxutil.WithCommitMessage(ctx, "Inserted YAML value from STDIN"), name, sec); err != nil {
+	if err := s.Store.Set(ctx, name, sec); err != nil {
 		if !errors.Is(err, store.ErrMeaninglessWrite) {
 			return exit.Error(exit.Encrypt, err, "failed to set key %q of %q: %s", key, name, err)
 		}
@@ -224,7 +235,7 @@ func (s *Action) insertYAML(ctx context.Context, name, key string, content []byt
 	return nil
 }
 
-func (s *Action) insertMultiline(ctx context.Context, c *cli.Context, name string) error {
+func (s *secretHandler) insertMultiline(ctx context.Context, cmd *cli.Command, name string) error {
 	buf := []byte{}
 	if s.Store.Exists(ctx, name) {
 		var err error
@@ -234,7 +245,7 @@ func (s *Action) insertMultiline(ctx context.Context, c *cli.Context, name strin
 		}
 		buf = sec.Bytes()
 	}
-	ed := editor.Path(c)
+	ed := editor.Path(ctx, cmd)
 	content, err := editor.Invoke(ctx, ed, buf)
 	if err != nil {
 		return exit.Error(exit.Unknown, err, "failed to start editor: %s", err)
@@ -246,7 +257,7 @@ func (s *Action) insertMultiline(ctx context.Context, c *cli.Context, name strin
 		out.Errorf(ctx, "WARNING: Invalid secret: %s of len %d", err, n)
 	}
 
-	if err := s.Store.Set(ctxutil.WithCommitMessage(ctx, fmt.Sprintf("Inserted user supplied password with %s", ed)), name, sec); err != nil {
+	if err := s.Store.Set(ctx, name, sec); err != nil {
 		if !errors.Is(err, store.ErrMeaninglessWrite) {
 			return exit.Error(exit.Encrypt, err, "failed to store secret %q: %s", name, err)
 		}

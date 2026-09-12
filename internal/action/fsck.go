@@ -14,18 +14,18 @@ import (
 	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/gopasspw/gopass/pkg/fsutil"
 	"github.com/gopasspw/gopass/pkg/termio"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // Fsck checks the store integrity.
-func (s *Action) Fsck(c *cli.Context) error {
+func (s *auditHandler) Fsck(ctx context.Context, cmd *cli.Command) error {
 	_ = s.rem.Reset("fsck")
 
-	filter := c.Args().First()
+	filter := cmd.Args().First()
 
-	ctx := ctxutil.WithGlobalFlags(c)
-	if c.IsSet("decrypt") {
-		ctx = leaf.WithFsckDecrypt(ctx, c.Bool("decrypt"))
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	if cmd.IsSet("decrypt") {
+		ctx = leaf.WithFsckDecrypt(ctx, cmd.Bool("decrypt"))
 	}
 
 	out.Printf(ctx, "Checking password store integrity ...")
@@ -47,13 +47,13 @@ func (s *Action) Fsck(c *cli.Context) error {
 
 	bar := termio.NewProgressBar(int64(len(pwList)) + 1)
 	bar.Hidden = ctxutil.IsHidden(ctx)
-	ctx = ctxutil.WithProgressCallback(ctx, func() {
+	progress := ctxutil.ProgressCallback(func() {
 		bar.Inc()
 	})
 	ctx = out.AddPrefix(ctx, "\n")
 
 	// the main work in done by the sub stores.
-	if err := s.Store.Fsck(ctx, c.String("store"), filter); err != nil {
+	if err := s.Store.Fsck(ctx, cmd.String("store"), filter, progress); err != nil {
 		return exit.Error(exit.Fsck, err, "fsck found errors: %s", err)
 	}
 	bar.Done()
@@ -61,7 +61,7 @@ func (s *Action) Fsck(c *cli.Context) error {
 	return nil
 }
 
-func (s *Action) fsckEntries(ctx context.Context, filter string) ([]string, error) {
+func (s *auditHandler) fsckEntries(ctx context.Context, filter string) ([]string, error) {
 	t, err := s.Store.Tree(ctx)
 	if err != nil {
 		return nil, exit.Error(exit.Unknown, err, "failed to list stores: %s", err)

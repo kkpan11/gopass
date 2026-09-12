@@ -24,19 +24,19 @@ import (
 	"github.com/gopasspw/gopass/pkg/pwgen/pwrules"
 	"github.com/gopasspw/gopass/pkg/pwgen/xkcdgen"
 	"github.com/gopasspw/gopass/pkg/termio"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 var reNumber = regexp.MustCompile(`^\d+$`)
 
 // Generate and save a password.
-func (s *Action) Generate(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
-	ctx = WithClip(ctx, c.Bool("clip"))
-	force := c.Bool("force")
-	edit := c.Bool("edit") // nolint:ifshort
+func (s *generateHandler) Generate(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	ctx = WithClip(ctx, cmd.Bool("clip"))
+	force := cmd.Bool("force")
+	edit := cmd.Bool("edit") // nolint:ifshort
 
-	args, kvps := parseArgs(c)
+	args, kvps := parseArgs(ctx, cmd)
 	name := args.Get(0)
 	key, length := keyAndLength(args)
 
@@ -51,6 +51,16 @@ func (s *Action) Generate(c *cli.Context) error {
 		}
 	}
 
+	// Check for custom commit message
+	commitMsg := "Generate Password"
+	if cmd.IsSet("commit-message") {
+		commitMsg = cmd.String("commit-message")
+	}
+	if cmd.Bool("interactive-commit") {
+		commitMsg = ""
+	}
+	ctx = ctxutil.WithCommitMessage(ctx, commitMsg)
+
 	// ask for confirmation before overwriting existing entry.
 	if !force { // don't check if it's force anyway.
 		if s.Store.Exists(ctx, name) && key == "" && !termio.AskForConfirmation(ctx, fmt.Sprintf("An entry already exists for %s. Overwrite the current password?", name)) {
@@ -62,26 +72,25 @@ func (s *Action) Generate(c *cli.Context) error {
 	ctx = config.WithMount(ctx, mp)
 
 	// generate password.
-	password, err := s.generatePassword(ctx, c, length, name)
+	password, err := s.generatePassword(ctx, cmd, length, name)
 	if err != nil {
 		return err
 	}
 
 	// display or copy to clipboard.
-	if err := s.generateCopyOrPrint(ctx, c, name, key, password); err != nil {
+	if err := s.generateCopyOrPrint(ctx, cmd, name, key, password); err != nil {
 		return err
 	}
 
 	// write generated password to store.
-	ctx, err = s.generateSetPassword(ctx, name, key, password, kvps, c.Bool("force-regen"))
+	ctx, err = s.generateSetPassword(ctx, name, key, password, kvps, cmd.Bool("force-regen"))
 	if err != nil {
 		return err
 	}
 
 	// if requested launch editor to add more data to the generated secret.
-	if edit && termio.AskForConfirmation(ctx, fmt.Sprintf("Do you want to add more data for %s?", name)) {
-		c.Context = ctx
-		if err := s.Edit(c); err != nil {
+	if edit {
+		if err := s.editFn(ctx, cmd); err != nil {
 			return exit.Error(exit.Unknown, err, "failed to edit %q: %s", name, err)
 		}
 	}
@@ -107,7 +116,7 @@ func keyAndLength(args argList) (string, string) {
 
 // generateCopyOrPrint will print the password to the screen or copy to the
 // clipboard.
-func (s *Action) generateCopyOrPrint(ctx context.Context, c *cli.Context, name, key, password string) error {
+func (s *generateHandler) generateCopyOrPrint(ctx context.Context, cmd *cli.Command, name, key, password string) error {
 	entry := name
 	if key != "" {
 		entry += " " + key
@@ -124,20 +133,20 @@ func (s *Action) generateCopyOrPrint(ctx context.Context, c *cli.Context, name, 
 		}
 		// if autoclip is on and we're not printing the password to the terminal
 		// at least leave a notice that we did indeed copy it.
-		if config.AsBool(s.cfg.Get("generate.autoclip")) && !c.Bool("print") {
+		if config.AsBool(s.cfg.Get("generate.autoclip")) && !cmd.Bool("print") {
 			out.Print(ctx, "Copied to clipboard")
 
 			return nil
 		}
 	}
 
-	if !c.Bool("print") {
+	if !cmd.Bool("print") {
 		out.Printf(ctx, "Not printing secrets by default. Use 'gopass show %s' to display the password.", entry)
 
 		return nil
 	}
 
-	if c.IsSet("print") && !c.Bool("print") && config.Bool(ctx, "show.safecontent") {
+	if cmd.IsSet("print") && !cmd.Bool("print") && config.Bool(ctx, "show.safecontent") {
 		debug.Log("safecontent suppressing printing")
 
 		return nil
@@ -152,7 +161,11 @@ func (s *Action) generateCopyOrPrint(ctx context.Context, c *cli.Context, name, 
 	return nil
 }
 
+// hasRuleForSecret extracts the domain from the secret name and checks if there is a
+// password rule for it. If so, it returns the domain and the rule. If the domain is
+// empty no rule is found.
 func hasPwRuleForSecret(ctx context.Context, name string) (string, pwrules.Rule) {
+	// trim elements from the end of the path until we find a domain or the root.
 	for name != "" && name != "." {
 		d := path.Base(name)
 		if r, found := pwrules.LookupRule(ctx, d); found {
@@ -165,29 +178,29 @@ func hasPwRuleForSecret(ctx context.Context, name string) (string, pwrules.Rule)
 }
 
 // generatePassword will run through the password generation steps.
-func (s *Action) generatePassword(ctx context.Context, c *cli.Context, length, name string) (string, error) {
-	if domain, rule := hasPwRuleForSecret(ctx, name); domain != "" && !c.Bool("force") {
-		return s.generatePasswordForRule(ctx, c, length, name, domain, rule)
+func (s *generateHandler) generatePassword(ctx context.Context, cmd *cli.Command, length, name string) (string, error) {
+	if domain, rule := hasPwRuleForSecret(ctx, name); domain != "" && !cmd.Bool("force") {
+		return s.generatePasswordForRule(ctx, length, domain, rule)
 	}
 
 	cfg, mp := config.FromContext(ctx)
 
+	generator := cfg.GetM(mp, "generate.generator")
+	if cmd.IsSet("generator") {
+		generator = cmd.String("generator")
+	}
+
+	if generator == "xkcd" {
+		return s.generatePasswordXKCD(ctx, cmd, length)
+	}
+
 	symbols := false
-	if c.IsSet("symbols") {
-		symbols = c.Bool("symbols")
+	if cmd.IsSet("symbols") {
+		symbols = cmd.Bool("symbols")
 	} else {
 		if cfg.GetM(mp, "generate.symbols") != "" {
 			symbols = config.AsBool(cfg.GetM(mp, "generate.symbols"))
 		}
-	}
-
-	generator := cfg.GetM(mp, "generate.generator")
-	if c.IsSet("generator") {
-		generator = c.String("generator")
-	}
-
-	if generator == "xkcd" {
-		return s.generatePasswordXKCD(ctx, c, length)
 	}
 
 	var pwlen int
@@ -211,7 +224,7 @@ func (s *Action) generatePassword(ctx context.Context, c *cli.Context, length, n
 
 	switch generator {
 	case "memorable":
-		if isStrict(ctx, c) {
+		if isStrict(ctx, cmd) {
 			return pwgen.GenerateMemorablePassword(pwlen, symbols, true), nil
 		}
 
@@ -219,7 +232,7 @@ func (s *Action) generatePassword(ctx context.Context, c *cli.Context, length, n
 	case "external":
 		return pwgen.GenerateExternal(pwlen)
 	default:
-		if isStrict(ctx, c) {
+		if isStrict(ctx, cmd) {
 			return pwgen.GeneratePasswordWithAllClasses(pwlen, symbols)
 		}
 
@@ -249,34 +262,39 @@ func getPwLengthFromEnvOrAskUser(ctx context.Context) (int, error) {
 	return pwlen, nil
 }
 
-func clamp(min, max, value int) int {
-	if value < min {
-		return min
-	}
-
-	if value > max && max > 0 {
-		return max
-	}
-
-	return value
-}
-
-func (s *Action) generatePasswordForRule(ctx context.Context, c *cli.Context, length, name, domain string, rule pwrules.Rule) (string, error) {
+// generatePasswordForRule validates the user-provided password length against
+// the rule for the domain and condtionally prompts the user for a correct
+// length if the initial value is invalid.
+func (s *generateHandler) generatePasswordForRule(ctx context.Context, length, domain string, rule pwrules.Rule) (string, error) {
 	out.Noticef(ctx, "Using password rules for %s ...", domain)
 
-	wl := 16
-	if iv, err := strconv.Atoi(length); err == nil {
-		wl = clamp(rule.Minlen, rule.Maxlen, iv)
-		debug.Log("restricting requested password length (%s) to %d because of the rule {%d,%d}", length, wl, rule.Minlen, rule.Maxlen)
-	}
+	var iv int
+	var err error
 
-	question := fmt.Sprintf("How long should the password be? (min: %d, max: %d)", rule.Minlen, rule.Maxlen)
-	iv, err := termio.AskForInt(ctx, question, wl)
-	if err != nil {
+	if iv, err = strconv.Atoi(length); err != nil {
 		return "", exit.Error(exit.Usage, err, "password length must be a number")
 	}
 
-	iv = clamp(rule.Minlen, rule.Maxlen, iv)
+	if iv < rule.Minlen || iv > rule.Maxlen {
+		debug.Log(
+			"pw length %s does not match rule {min: %d, max: %d}, prompting for another one",
+			length, rule.Minlen, rule.Maxlen,
+		)
+
+		question := fmt.Sprintf(
+			"How long should the password be? (min: %d, max: %d)",
+			rule.Minlen, rule.Maxlen,
+		)
+
+		var sv string
+
+		if sv, err = termio.AskForString(ctx, question, strconv.Itoa(rule.Maxlen)); err != nil {
+			return "", err
+		}
+
+		// recursively prompt the user until a valid length is provided
+		return s.generatePasswordForRule(ctx, sv, domain, rule)
+	}
 
 	pw := pwgen.NewCrypticForDomain(ctx, iv, domain).Password()
 	if pw == "" {
@@ -288,25 +306,25 @@ func (s *Action) generatePasswordForRule(ctx context.Context, c *cli.Context, le
 
 // generatePasswordXKCD walks through the steps necessary to create an XKCD-style
 // password.
-func (s *Action) generatePasswordXKCD(ctx context.Context, c *cli.Context, length string) (string, error) {
-	sep := config.String(c.Context, "pwgen.xkcd-sep")
-	if c.IsSet("sep") {
-		sep = c.String("sep")
+func (s *generateHandler) generatePasswordXKCD(ctx context.Context, cmd *cli.Command, length string) (string, error) {
+	sep := config.String(ctx, "pwgen.xkcd-sep")
+	if cmd.IsSet("xkcd-sep") {
+		sep = cmd.String("xkcd-sep")
 	}
-	lang := config.String(c.Context, "pwgen.xkcd-lang")
-	if c.IsSet("lang") {
-		lang = c.String("lang")
+	lang := config.String(ctx, "pwgen.xkcd-lang")
+	if cmd.IsSet("xkcd-lang") {
+		lang = cmd.String("xkcd-lang")
 	}
-	capitalize := config.Bool(c.Context, "pwgen.xkcd-capitalize")
-	if c.IsSet("xkcdcapitalize") {
-		capitalize = c.Bool("xkcdcapitalize")
+	capitalize := config.Bool(ctx, "pwgen.xkcd-capitalize")
+	if cmd.IsSet("xkcd-capitalize") {
+		capitalize = cmd.Bool("xkcd-capitalize")
 	}
-	num := config.Bool(c.Context, "pwgen.xkcd-numbers")
-	if c.IsSet("xkcdnumbers") {
-		num = c.Bool("xkcdnumbers")
+	num := config.Bool(ctx, "pwgen.xkcd-numbers")
+	if cmd.IsSet("xkcd-numbers") {
+		num = cmd.Bool("xkcd-numbers")
 	}
 
-	pwlen := config.Int(c.Context, "pwgen.xkcd-len")
+	pwlen := config.Int(ctx, "pwgen.xkcd-len")
 	switch {
 	case length != "":
 		// using the command line supplied value
@@ -335,7 +353,7 @@ func (s *Action) generatePasswordXKCD(ctx context.Context, c *cli.Context, lengt
 }
 
 // generateSetPassword will update or create a secret.
-func (s *Action) generateSetPassword(ctx context.Context, name, key, password string, kvps map[string]string, regen bool) (context.Context, error) {
+func (s *generateHandler) generateSetPassword(ctx context.Context, name, key, password string, kvps map[string]string, regen bool) (context.Context, error) {
 	// set a single key in an entry.
 	if key != "" {
 		sec, err := s.Store.Get(ctx, name)
@@ -345,7 +363,7 @@ func (s *Action) generateSetPassword(ctx context.Context, name, key, password st
 
 		setMetadata(sec, kvps)
 		_ = sec.Set(key, password)
-		if err := s.Store.Set(ctxutil.WithCommitMessage(ctx, "Generated password for key"), name, sec); err != nil {
+		if err := s.Store.Set(ctx, name, sec); err != nil {
 			if !errors.Is(err, store.ErrMeaninglessWrite) {
 				return ctx, exit.Error(exit.Encrypt, err, "failed to set key %q of %q: %s", key, name, err)
 			}
@@ -374,7 +392,7 @@ func (s *Action) generateSetPassword(ctx context.Context, name, key, password st
 		_ = sec.Set("password-change-url", u)
 	}
 
-	if content, found := s.renderTemplate(ctx, name, []byte(password)); found {
+	if content, found := s.renderTemplateFn(ctx, name, []byte(password)); found {
 		nSec := secrets.NewAKV()
 		if _, err := nSec.Write(content); err == nil {
 			sec = nSec
@@ -383,7 +401,7 @@ func (s *Action) generateSetPassword(ctx context.Context, name, key, password st
 		}
 	}
 
-	if err := s.Store.Set(ctxutil.WithCommitMessage(ctx, "Generated Password"), name, sec); err != nil {
+	if err := s.Store.Set(ctx, name, sec); err != nil {
 		if !errors.Is(err, store.ErrMeaninglessWrite) {
 			return ctx, exit.Error(exit.Encrypt, err, "failed to create %q: %s", name, err)
 		}
@@ -404,7 +422,7 @@ func hasChangeURL(ctx context.Context, name string) string {
 	return ""
 }
 
-func (s *Action) generateReplaceExisting(ctx context.Context, name, key, password string, kvps map[string]string) (context.Context, error) {
+func (s *generateHandler) generateReplaceExisting(ctx context.Context, name, key, password string, kvps map[string]string) (context.Context, error) {
 	sec, err := s.Store.Get(ctx, name)
 	if err != nil {
 		return ctx, exit.Error(exit.Encrypt, err, "failed to set key %q of %q: %s", key, name, err)
@@ -412,7 +430,7 @@ func (s *Action) generateReplaceExisting(ctx context.Context, name, key, passwor
 
 	setMetadata(sec, kvps)
 	sec.SetPassword(password)
-	if err := s.Store.Set(ctxutil.WithCommitMessage(ctx, "Generated password for YAML key"), name, sec); err != nil {
+	if err := s.Store.Set(ctx, name, sec); err != nil {
 		if !errors.Is(err, store.ErrMeaninglessWrite) {
 			return ctx, exit.Error(exit.Encrypt, err, "failed to set key %q of %q: %s", key, name, err)
 		}
@@ -430,12 +448,12 @@ func setMetadata(sec gopass.Secret, kvps map[string]string) {
 }
 
 // CompleteGenerate implements the completion heuristic for the generate command.
-func (s *Action) CompleteGenerate(c *cli.Context) {
-	ctx := ctxutil.WithGlobalFlags(c)
-	if c.Args().Len() < 1 {
+func (s *generateHandler) CompleteGenerate(ctx context.Context, cmd *cli.Command) {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	if cmd.Args().Len() < 1 {
 		return
 	}
-	needle := c.Args().Get(0) // nolint:ifshort
+	needle := cmd.Args().Get(0) // nolint:ifshort
 
 	_, err := s.Store.IsInitialized(ctx) // important to make sure the structs are not nil.
 	if err != nil {
@@ -513,10 +531,10 @@ func filterPrefix(in []string, prefix string) []string {
 	return out
 }
 
-func isStrict(ctx context.Context, c *cli.Context) bool {
+func isStrict(ctx context.Context, cmd *cli.Command) bool {
 	cfg, mp := config.FromContext(ctx)
 
-	if c.Bool("strict") {
+	if cmd.Bool("strict") {
 		return true
 	}
 

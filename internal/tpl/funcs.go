@@ -190,7 +190,10 @@ func get(ctx context.Context, kv kvstore) func(...string) (string, error) {
 
 		sec, err := kv.Get(ctx, s[0])
 		if err != nil {
-			return err.Error(), nil
+			// Return a generic error instead of err.Error() to avoid leaking
+			// internal backend details (GPG errors, file paths, etc.) into
+			// template output.
+			return "", fmt.Errorf("failed to retrieve secret")
 		}
 
 		return string(sec.Bytes()), nil
@@ -209,7 +212,10 @@ func getPassword(ctx context.Context, kv kvstore) func(...string) (string, error
 
 		sec, err := kv.Get(ctx, s[0])
 		if err != nil {
-			return err.Error(), nil
+			// Return a generic error instead of err.Error() to avoid leaking
+			// internal backend details (GPG errors, file paths, etc.) into
+			// template output.
+			return "", fmt.Errorf("failed to retrieve secret")
 		}
 
 		return sec.Password(), nil
@@ -228,7 +234,10 @@ func getValue(ctx context.Context, kv kvstore) func(...string) (string, error) {
 
 		sec, err := kv.Get(ctx, s[0])
 		if err != nil {
-			return err.Error(), nil
+			// Return a generic error instead of err.Error() to avoid leaking
+			// internal backend details (GPG errors, file paths, etc.) into
+			// template output.
+			return "", fmt.Errorf("failed to retrieve secret")
 		}
 
 		sv, found := sec.Get(s[1])
@@ -288,17 +297,17 @@ func roundDuration(duration any) string {
 	second := uint64(time.Second)
 
 	switch {
-	case u > year:
+	case u >= year:
 		return strconv.FormatUint(u/year, 10) + "y"
-	case u > month:
+	case u >= month:
 		return strconv.FormatUint(u/month, 10) + "mo"
-	case u > day:
+	case u >= day:
 		return strconv.FormatUint(u/day, 10) + "d"
-	case u > hour:
+	case u >= hour:
 		return strconv.FormatUint(u/hour, 10) + "h"
-	case u > minute:
+	case u >= minute:
 		return strconv.FormatUint(u/minute, 10) + "m"
-	case u > second:
+	case u >= second:
 		return strconv.FormatUint(u/second, 10) + "s"
 	default:
 		return "0s"
@@ -311,11 +320,12 @@ func date(ts time.Time) string {
 
 func truncate(length int, v any) string {
 	sv := strval(v)
-	if len(sv) < length-3 {
+	// we can't properly truncate to zero, so we return the full string
+	if len(sv) < length {
 		return sv
 	}
 
-	return sv[:length-3] + "..."
+	return sv[:length] + "..."
 }
 
 func join(sep string, v any) string {
@@ -326,7 +336,7 @@ func stringslice(v any) []string {
 	switch v := v.(type) {
 	case []string:
 		return v
-	case []interface{}:
+	case []any:
 		res := make([]string, 0, len(v))
 		for _, s := range v {
 			if s == nil {

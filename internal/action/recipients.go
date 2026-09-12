@@ -2,18 +2,19 @@ package action
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/gopasspw/gopass/internal/action/exit"
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/cui"
 	"github.com/gopasspw/gopass/internal/out"
-	"github.com/gopasspw/gopass/internal/set"
 	"github.com/gopasspw/gopass/internal/tree"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/gopasspw/gopass/pkg/debug"
+	"github.com/gopasspw/gopass/pkg/set"
 	"github.com/gopasspw/gopass/pkg/termio"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 var removalWarning = `
@@ -34,13 +35,51 @@ credentials.
 `
 
 // RecipientsPrint prints all recipients per store.
-func (s *Action) RecipientsPrint(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
-	out.Printf(ctx, "Hint: run 'gopass sync' to import any missing public keys")
+func (s *recipientHandler) RecipientsPrint(ctx context.Context, cmd *cli.Command) error {
+	if cmd.Args().Len() > 0 {
+		return exit.Error(exit.Usage, nil, "Usage: %s recipients [--pretty] [--json]", s.Name)
+	}
 
-	t, err := s.Store.RecipientsTree(ctx, c.Bool("pretty"))
+	return s.recipientsPrint(ctx, cmd, "")
+}
+
+// RecipientsList prints recipients below an optional prefix.
+func (s *recipientHandler) RecipientsList(ctx context.Context, cmd *cli.Command) error {
+	return s.recipientsPrint(ctx, cmd, cmd.Args().First())
+}
+
+func (s *recipientHandler) recipientsPrint(ctx context.Context, cmd *cli.Command, prefix string) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+
+	var t *tree.Root
+	var err error
+	if prefix == "" {
+		t, err = s.Store.RecipientsTree(ctx, cmd.Bool("pretty"))
+	} else {
+		t, err = s.Store.RecipientsTreePrefix(ctx, cmd.Bool("pretty"), prefix)
+	}
 	if err != nil {
+		if errors.Is(err, tree.ErrNotFound) {
+			return exit.Error(exit.NotFound, nil, "Recipient subtree %q not found", prefix)
+		}
+
 		return exit.Error(exit.List, err, "failed to list recipients: %s", err)
+	}
+
+	if prefix != "" {
+		t, err = t.FindFolder(prefix)
+		if err != nil {
+			return exit.Error(exit.NotFound, nil, "Recipient subtree %q not found", prefix)
+		}
+		t.SetName(prefix)
+	}
+
+	if cmd.Bool("json") {
+		return jsonWrite(stdout, t.List(tree.INF))
+	}
+
+	if prefix == "" {
+		out.Printf(ctx, "Hint: run 'gopass sync' to import any missing public keys")
 	}
 
 	fmt.Fprintln(stdout, t.Format(tree.INF))
@@ -48,7 +87,7 @@ func (s *Action) RecipientsPrint(c *cli.Context) error {
 	return nil
 }
 
-func (s *Action) recipientsList(ctx context.Context) []string {
+func (s *recipientHandler) recipientsList(ctx context.Context) []string {
 	t, err := s.Store.RecipientsTree(ctxutil.WithHidden(ctx, true), false)
 	if err != nil {
 		debug.Log("failed to list recipients: %s", err)
@@ -61,10 +100,10 @@ func (s *Action) recipientsList(ctx context.Context) []string {
 
 // RecipientsComplete will print a list of recipients for bash
 // completion.
-func (s *Action) RecipientsComplete(c *cli.Context) {
-	ctx := ctxutil.WithGlobalFlags(c)
-	if err := s.IsInitialized(c); err != nil {
-		debug.Log("IsInitialized returned error: %s", err)
+func (s *recipientHandler) RecipientsComplete(ctx context.Context, cmd *cli.Command) {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	if ok, err := s.Store.IsInitialized(ctx); err != nil || !ok {
+		debug.Log("store not initialized: %v", err)
 
 		return
 	}
@@ -75,17 +114,17 @@ func (s *Action) RecipientsComplete(c *cli.Context) {
 }
 
 // RecipientsAck updates `recipients.hash`.
-func (s *Action) RecipientsAck(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
+func (s *recipientHandler) RecipientsAck(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
 
 	return s.Store.SaveRecipients(ctxutil.WithHidden(ctx, true), true)
 }
 
 // RecipientsAdd adds new recipients.
-func (s *Action) RecipientsAdd(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
-	store := c.String("store")
-	force := c.Bool("force")
+func (s *recipientHandler) RecipientsAdd(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	store := cmd.String("store")
+	force := cmd.Bool("force")
 	added := 0
 
 	// select store.
@@ -102,7 +141,7 @@ func (s *Action) RecipientsAdd(c *cli.Context) error {
 	crypto := s.Store.Crypto(ctx, store)
 
 	// select recipient.
-	recipients := c.Args().Slice()
+	recipients := cmd.Args().Slice()
 	if len(recipients) < 1 {
 		out.Notice(ctx, "Fetching available recipients. Please wait...")
 
@@ -143,7 +182,7 @@ func (s *Action) RecipientsAdd(c *cli.Context) error {
 
 		debug.Log("found recipients for %q: %+v", r, keys)
 
-		if !termio.AskForConfirmation(ctx, fmt.Sprintf("Do you want to add %q (key %q) as a recipient to the store %q?", crypto.FormatKey(ctx, r, ""), r, store)) {
+		if !force && !termio.AskForConfirmation(ctx, fmt.Sprintf("Do you want to add %q (key %q) as a recipient to the store %q?", crypto.FormatKey(ctx, r, ""), r, store)) {
 			continue
 		}
 
@@ -163,14 +202,14 @@ func (s *Action) RecipientsAdd(c *cli.Context) error {
 }
 
 // RecipientsRemove removes recipients.
-func (s *Action) RecipientsRemove(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
-	store := c.String("store")
-	force := c.Bool("force")
+func (s *recipientHandler) RecipientsRemove(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	store := cmd.String("store")
+	force := cmd.Bool("force")
 	removed := 0
 
 	// select store if none is given.
-	if !c.IsSet("store") {
+	if !cmd.IsSet("store") {
 		store = cui.AskForStore(ctx, s.Store)
 	}
 
@@ -179,7 +218,7 @@ func (s *Action) RecipientsRemove(c *cli.Context) error {
 	crypto := s.Store.Crypto(ctx, store)
 
 	// ask to select a recipient if none are given.
-	recipients := c.Args().Slice()
+	recipients := cmd.Args().Slice()
 	if len(recipients) < 1 {
 		rs, err := s.recipientsSelectForRemoval(ctx, store)
 		if err != nil {
@@ -261,13 +300,14 @@ func (s *Action) RecipientsRemove(c *cli.Context) error {
 	return nil
 }
 
-func (s *Action) recipientsSelectForRemoval(ctx context.Context, store string) ([]string, error) {
+func (s *recipientHandler) recipientsSelectForRemoval(ctx context.Context, store string) ([]string, error) {
 	crypto := s.Store.Crypto(ctx, store)
 
 	ids := s.Store.ListRecipients(ctx, store)
 	choices := make([]string, 0, len(ids))
+	formatted := crypto.FormatKeys(ctx, ids)
 	for _, id := range ids {
-		choices = append(choices, crypto.FormatKey(ctx, id, ""))
+		choices = append(choices, formatted[id])
 	}
 
 	if len(choices) < 1 {
@@ -285,13 +325,14 @@ func (s *Action) recipientsSelectForRemoval(ctx context.Context, store string) (
 	}
 }
 
-func (s *Action) recipientsSelectForAdd(ctx context.Context, store string) ([]string, error) {
+func (s *recipientHandler) recipientsSelectForAdd(ctx context.Context, store string) ([]string, error) {
 	crypto := s.Store.Crypto(ctx, store)
 
-	choices := []string{}
 	kl, _ := crypto.FindRecipients(ctx)
+	choices := make([]string, 0, len(kl))
+	formatted := crypto.FormatKeys(ctx, kl)
 	for _, key := range kl {
-		choices = append(choices, crypto.FormatKey(ctx, key, ""))
+		choices = append(choices, formatted[key])
 	}
 
 	if len(choices) < 1 {
@@ -307,4 +348,53 @@ func (s *Action) recipientsSelectForAdd(ctx context.Context, store string) ([]st
 	default:
 		return nil, exit.Error(exit.Aborted, nil, "user aborted")
 	}
+}
+
+// RecipientsCanonicalize rewrites the .gpg-id of the given store so that every
+// recipient ID is in its canonical (full-fingerprint) form and renames the
+// corresponding .public-keys/ files to match. This migration does not require
+// re-encryption. After running this command, use 'gopass sync' to publish the
+// changes to other team members.
+func (s *recipientHandler) RecipientsCanonicalize(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+
+	store := cmd.String("store")
+	if store == "" {
+		store = cui.AskForStore(ctx, s.Store)
+	}
+
+	out.Printf(ctx, "Canonicalizing recipient IDs for store %q ...", store)
+
+	if err := s.Store.CanonicalizeRecipients(ctx, store); err != nil {
+		return exit.Error(exit.Recipients, err, "failed to canonicalize recipients: %s", err)
+	}
+
+	out.OKf(ctx, "Done. You may want to run 'gopass sync' to push changes.")
+
+	return nil
+}
+
+// RecipientsUpdate re-exports the named recipients' public keys from the
+// local keyring into .public-keys/, overwriting stale copies. This is the
+// 'gopass recipients update' command (Stage 4 / GH-1430). If no IDs are
+// given, the current user's own identity is updated.
+func (s *recipientHandler) RecipientsUpdate(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+
+	store := cmd.String("store")
+	if store == "" {
+		store = cui.AskForStore(ctx, s.Store)
+	}
+
+	ids := cmd.Args().Slice()
+
+	out.Printf(ctx, "Refreshing public keys in store %q ...", store)
+
+	if err := s.Store.UpdateRecipientKeys(ctx, store, ids); err != nil {
+		return exit.Error(exit.Recipients, err, "failed to update recipient keys: %s", err)
+	}
+
+	out.OKf(ctx, "Done. You may want to run 'gopass sync' to push the updated keys.")
+
+	return nil
 }

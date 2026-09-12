@@ -19,21 +19,29 @@ import (
 	"github.com/mattn/go-tty"
 	"github.com/pquerna/otp/hotp"
 	"github.com/pquerna/otp/totp"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // OTP implements OTP token handling for TOTP and HOTP.
-func (s *Action) OTP(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
-	name := c.Args().First()
+func (s *otpHandler) OTP(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	name := cmd.Args().First()
 	if name == "" {
 		return exit.Error(exit.Usage, nil, "Usage: %s otp <NAME>", s.Name)
 	}
 
-	qrf := c.String("qr")
-	clip := c.Bool("clip")
-	pw := c.Bool("password")
-	snip := c.Bool("snip")
+	qrf := cmd.String("qr")
+	clip := config.Bool(ctx, "otp.onlyclip")
+	if cmd.IsSet("clip") {
+		clip = cmd.Bool("clip")
+	}
+	alsoClip := config.Bool(ctx, "otp.autoclip")
+	if cmd.IsSet("alsoclip") {
+		alsoClip = cmd.Bool("alsoclip")
+	}
+	chained := cmd.Bool("chained")
+	pw := cmd.Bool("password")
+	snip := cmd.Bool("snip")
 
 	if snip {
 		qr, err := otp.ParseScreen(ctx)
@@ -45,7 +53,7 @@ func (s *Action) OTP(c *cli.Context) error {
 		if err != nil || !choice {
 			return err
 		}
-		err = s.insertYAML(ctxutil.WithInteractive(ctx, false), name, "otpauth", []byte(qr), nil)
+		err = s.insertYAMLFn(ctxutil.WithInteractive(ctx, false), name, "otpauth", []byte(qr), nil)
 		if err != nil {
 			return err
 		}
@@ -53,7 +61,7 @@ func (s *Action) OTP(c *cli.Context) error {
 		out.Print(ctx, "Value written, carrying on to display OTP value from it.")
 	}
 
-	return s.otp(ctx, name, qrf, clip, pw, true)
+	return s.otp(ctx, name, qrf, clip, pw, true, chained, alsoClip)
 }
 
 func tickingBar(ctx context.Context, expiresAt time.Time, bar *termio.ProgressBar) {
@@ -105,10 +113,10 @@ func waitForKeyPress(ctx context.Context, cancel context.CancelFunc) (func(), fu
 }
 
 // nolint: cyclop
-func (s *Action) otp(ctx context.Context, name, qrf string, clip, pw, recurse bool) error {
+func (s *otpHandler) otp(ctx context.Context, name, qrf string, clip, pw, recurse, chained, alsoClip bool) error {
 	sec, err := s.Store.Get(ctx, name)
 	if err != nil {
-		return s.otpHandleError(ctx, name, qrf, clip, pw, recurse, err)
+		return s.otpHandleError(ctx, name, qrf, clip, pw, recurse, chained, alsoClip, err)
 	}
 
 	outerCtx := ctx
@@ -151,6 +159,7 @@ func (s *Action) otp(ctx context.Context, name, qrf string, clip, pw, recurse bo
 				Skew:      1,
 				Digits:    two.Digits(),
 				Algorithm: two.Algorithm(),
+				Encoder:   two.Encoder(),
 			})
 			if err != nil {
 				return exit.Error(exit.Unknown, err, "Failed to compute OTP token for %s: %s", name, err)
@@ -159,6 +168,7 @@ func (s *Action) otp(ctx context.Context, name, qrf string, clip, pw, recurse bo
 			token, err = hotp.GenerateCodeCustom(two.Secret(), counter, hotp.ValidateOpts{
 				Digits:    two.Digits(),
 				Algorithm: two.Algorithm(),
+				Encoder:   two.Encoder(),
 			})
 			if err != nil {
 				return exit.Error(exit.Unknown, err, "Failed to compute OTP token for %s: %s", name, err)
@@ -180,12 +190,16 @@ func (s *Action) otp(ctx context.Context, name, qrf string, clip, pw, recurse bo
 
 		debug.Log("OTP period: %ds", two.Period())
 
-		if clip {
+		if chained {
+			token = fmt.Sprintf("%s%s", sec.Password(), token)
+		}
+		if clip || alsoClip {
 			if err := clipboard.CopyTo(ctx, fmt.Sprintf("token for %s", name), []byte(token), config.AsInt(s.cfg.Get("core.cliptimeout"))); err != nil {
 				return exit.Error(exit.IO, err, "failed to copy to clipboard: %s", err)
 			}
-
-			return nil
+			if clip {
+				return nil
+			}
 		}
 
 		out.Printf(ctx, "%s", token)
@@ -231,16 +245,16 @@ func (s *Action) otp(ctx context.Context, name, qrf string, clip, pw, recurse bo
 	}
 }
 
-func (s *Action) otpHandleError(ctx context.Context, name, qrf string, clip, pw, recurse bool, err error) error {
+func (s *otpHandler) otpHandleError(ctx context.Context, name, qrf string, clip, pw, recurse, chained, alsoClip bool, err error) error {
 	if !errors.Is(err, store.ErrNotFound) || !recurse || !ctxutil.IsTerminal(ctx) {
 		return exit.Error(exit.Unknown, err, "failed to retrieve secret %q: %s", name, err)
 	}
 
 	out.Printf(ctx, "Entry %q not found. Starting search...", name)
-	cb := func(ctx context.Context, c *cli.Context, name string, recurse bool) error {
-		return s.otp(ctx, name, qrf, clip, pw, false)
+	cb := func(ctx context.Context, cmd *cli.Command, name string, recurse bool) error {
+		return s.otp(ctx, name, qrf, clip, pw, false, chained, alsoClip)
 	}
-	if err := s.find(ctx, nil, name, cb, false); err != nil {
+	if err := s.findFn(ctx, nil, name, cb, false); err != nil {
 		return exit.Error(exit.NotFound, err, "%s", err)
 	}
 

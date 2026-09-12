@@ -1,6 +1,7 @@
 package action
 
 import (
+	"context"
 	"regexp"
 	"strings"
 
@@ -9,18 +10,18 @@ import (
 	"github.com/gopasspw/gopass/internal/out"
 	"github.com/gopasspw/gopass/internal/tree"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // Grep searches a string inside the content of all files.
-func (s *Action) Grep(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
-	if !c.Args().Present() {
+func (s *searchHandler) Grep(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	if !cmd.Args().Present() {
 		return exit.Error(exit.Usage, nil, "Usage: %s grep arg", s.Name)
 	}
 
 	// get the search term.
-	needle := c.Args().First()
+	needle := cmd.Args().First()
 
 	haystack, err := s.Store.List(ctx, tree.INF)
 	if err != nil {
@@ -31,7 +32,7 @@ func (s *Action) Grep(c *cli.Context) error {
 		return strings.Contains(haystack, needle)
 	}
 
-	if c.Bool("regexp") {
+	if cmd.Bool("regexp") {
 		re, err := regexp.Compile(needle)
 		if err != nil {
 			return exit.Error(exit.Usage, err, "failed to compile regexp %q: %s", needle, err)
@@ -44,13 +45,15 @@ func (s *Action) Grep(c *cli.Context) error {
 	for _, v := range haystack {
 		sec, err := s.Store.Get(ctx, v)
 		if err != nil {
-			out.Errorf(ctx, "failed to decrypt %s: %v", v, err)
+			out.Errorf(ctx, "Failed to decrypt %s: %v", v, err)
+			errors++
 
 			continue
 		}
 
 		if matchFn(string(sec.Bytes())) {
 			out.Printf(ctx, "%s matches", color.BlueString(v))
+			matches++
 		}
 	}
 

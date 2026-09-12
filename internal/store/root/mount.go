@@ -16,7 +16,7 @@ import (
 
 // AddMount adds a new mount.
 func (r *Store) AddMount(ctx context.Context, alias, path string, keys ...string) error {
-	if err := r.addMount(ctx, alias, path, keys...); err != nil {
+	if err := r.addMount(ctx, alias, path, true, keys...); err != nil {
 		return fmt.Errorf("failed to add mount: %w", err)
 	}
 
@@ -24,7 +24,11 @@ func (r *Store) AddMount(ctx context.Context, alias, path string, keys ...string
 	return r.checkMounts()
 }
 
-func (r *Store) addMount(ctx context.Context, alias, path string, keys ...string) error {
+// addMount adds a mount to the root store. If persist is true the mount path is
+// written to the config. Existing mounts that are loaded on startup must not be
+// persisted, both to avoid needless writes and to keep gopass working with a
+// read-only config.
+func (r *Store) addMount(ctx context.Context, alias, path string, persist bool, keys ...string) error {
 	// disallow filepath separators in alias and always disallow regular slashes
 	// even on Windows, since these are used internally to separate folders.
 	if strings.HasSuffix(alias, "/") {
@@ -57,8 +61,10 @@ func (r *Store) addMount(ctx context.Context, alias, path string, keys ...string
 	}
 
 	r.mounts[alias] = s
-	if err := r.cfg.SetMountPath(alias, path); err != nil {
-		return fmt.Errorf("failed to set mount path: %w", err)
+	if persist {
+		if err := r.cfg.SetMountPath(alias, path); err != nil {
+			return fmt.Errorf("failed to set mount path: %w", err)
+		}
 	}
 
 	debug.Log("Added mount %s -> %s (%s)", alias, path, fullPath)
@@ -72,6 +78,10 @@ func (r *Store) initSub(ctx context.Context, alias, path string, keys []string) 
 	s, err := leaf.New(ctx, alias, path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize store %q at %q: %w", alias, path, err)
+	}
+
+	if r.importCallback != nil {
+		s.SetImportFunc(r.importCallback)
 	}
 
 	if s.IsInitialized(ctx) {
@@ -105,10 +115,6 @@ func (r *Store) initSub(ctx context.Context, alias, path string, keys []string) 
 func (r *Store) RemoveMount(ctx context.Context, alias string) error {
 	if _, found := r.mounts[alias]; !found {
 		out.Warningf(ctx, "%s is not mounted", alias)
-	}
-
-	if _, found := r.mounts[alias]; !found {
-		out.Warningf(ctx, "%s is not initialized", alias)
 	}
 
 	delete(r.mounts, alias)
@@ -173,7 +179,7 @@ func (r *Store) getStore(name string) (*leaf.Store, string) {
 	mp := r.MountPoint(name)
 
 	if sub, found := r.mounts[mp]; found {
-		return sub, strings.TrimPrefix(name, sub.Alias())
+		return sub, strings.TrimPrefix(strings.TrimPrefix(name, sub.Alias()), "/")
 	}
 
 	return r.store, name
@@ -213,20 +219,5 @@ func (r *Store) checkMounts() error {
 // CleanMountAlias removes all leading and trailing slashes from a mount alias.
 // Note: Slashes inside the alias are valid and will be kept.
 func CleanMountAlias(alias string) string {
-	for {
-		if !strings.HasPrefix(alias, "/") && !strings.HasPrefix(alias, "\\") {
-			break
-		}
-		alias = strings.TrimPrefix(strings.TrimSuffix(alias, "/"), "/")
-		alias = strings.TrimPrefix(strings.TrimSuffix(alias, "\\"), "\\")
-	}
-	for {
-		if !strings.HasSuffix(alias, "/") && !strings.HasSuffix(alias, "\\") {
-			break
-		}
-		alias = strings.TrimSuffix(strings.TrimPrefix(alias, "/"), "/")
-		alias = strings.TrimSuffix(strings.TrimPrefix(alias, "\\"), "\\")
-	}
-
-	return alias
+	return strings.Trim(alias, "/\\")
 }

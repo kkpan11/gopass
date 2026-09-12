@@ -46,8 +46,8 @@ func Example() {
 func TestTempdirBase(t *testing.T) {
 	t.Parallel()
 
-	tempdir, err := os.MkdirTemp(tempdirBase(), "gopass-")
-	require.NoError(t, err)
+	tempdir := t.TempDir()
+	require.NotEmpty(t, tempdir)
 
 	defer func() {
 		_ = os.RemoveAll(tempdir)
@@ -62,7 +62,7 @@ func TestTempdirBaseEmpty(t *testing.T) {
 
 	shmDir = "/this/should/not/exist"
 
-	assert.Equal(t, "", tempdirBase())
+	assert.Empty(t, tempdirBase())
 }
 
 func TestTempFiler(t *testing.T) {
@@ -84,7 +84,7 @@ func TestTempFiler(t *testing.T) {
 
 	// uninitialized tempfile
 	utf := File{}
-	assert.Equal(t, "", utf.Name())
+	assert.Empty(t, utf.Name())
 	_, err = utf.Write([]byte("foo"))
 	require.Error(t, err)
 	require.NoError(t, utf.Remove(ctx))
@@ -105,7 +105,7 @@ func TestGlobalPrefix(t *testing.T) {
 	}
 	ctx := config.NewContextInMemory()
 
-	assert.Equal(t, "", globalPrefix)
+	assert.Empty(t, globalPrefix)
 
 	// without global prefix
 	withoutGlobalPrefix, err := New(ctx, "some-prefix")

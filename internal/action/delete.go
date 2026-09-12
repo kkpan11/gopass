@@ -12,25 +12,25 @@ import (
 	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/gopasspw/gopass/pkg/debug"
 	"github.com/gopasspw/gopass/pkg/termio"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // Delete a secret file with its content.
-func (s *Action) Delete(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
-	recursive := c.Bool("recursive")
+func (s *secretHandler) Delete(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	recursive := cmd.Bool("recursive")
 
-	name := c.Args().First()
+	name := cmd.Args().First()
 	if name == "" {
 		return exit.Error(exit.Usage, nil, "Usage: %s rm name", s.Name)
 	}
 
 	if recursive {
-		if len(c.Args().Tail()) > 1 {
+		if len(cmd.Args().Tail()) > 1 {
 			return exit.Error(exit.Usage, nil, "Deleting multiple keys is not supported in recursive mode")
 		}
 
-		return s.deleteRecursive(ctx, name, c.Bool("force"))
+		return s.deleteRecursive(ctx, name, cmd.Bool("force"))
 	}
 
 	if s.Store.IsDir(ctx, name) && !s.Store.Exists(ctx, name) {
@@ -38,14 +38,27 @@ func (s *Action) Delete(c *cli.Context) error {
 	}
 
 	// specifying a key is optional.
-	key := c.Args().Get(1)
+	key := cmd.Args().Get(1)
 
 	// multiple secrets, so not a key
-	if len(c.Args().Tail()) > 1 {
+	if len(cmd.Args().Tail()) > 1 {
 		key = ""
 	}
 
-	names := append([]string{name}, c.Args().Tail()...)
+	// Check for custom commit message
+	commitMsg := fmt.Sprintf("Delete %s", name)
+	if key != "" {
+		commitMsg = fmt.Sprintf("Delete key %s from %s", key, name)
+	}
+	if cmd.IsSet("commit-message") {
+		commitMsg = cmd.String("commit-message")
+	}
+	if cmd.Bool("interactive-commit") {
+		commitMsg = ""
+	}
+	ctx = ctxutil.WithCommitMessage(ctx, commitMsg)
+
+	names := append([]string{name}, cmd.Args().Tail()...)
 
 	if key != "" && s.Store.Exists(ctx, key) {
 		return exit.Error(exit.Unsupported, nil, "Key %q clashes with a secret of this name, use 'gopass edit %s' to delete", key, name)
@@ -55,7 +68,7 @@ func (s *Action) Delete(c *cli.Context) error {
 		return exit.Error(exit.NotFound, nil, "Secret %q does not exist", name)
 	}
 
-	if !c.Bool("force") { // don't check if it's force anyway.
+	if !cmd.Bool("force") { // don't check if it's force anyway.
 		qStr := fmt.Sprintf("☠ Are you sure you would like to delete %q?", names)
 		if key != "" {
 			qStr = fmt.Sprintf("☠ Are you sure you would like to delete %q from %q?", key, name)
@@ -75,7 +88,7 @@ func (s *Action) Delete(c *cli.Context) error {
 	for _, name := range names {
 		debug.Log("removing entry %q", name)
 		if err := s.Store.Delete(ctx, name); err != nil {
-			return exit.Error(exit.IO, err, "Can not delete %q: %s", name, err)
+			return exit.Error(exit.IO, err, "Cannot delete %q: %s", name, err)
 		}
 
 		if err := hook.InvokeRoot(ctx, "delete.post-hook", name, s.Store); err != nil {
@@ -86,7 +99,7 @@ func (s *Action) Delete(c *cli.Context) error {
 	return nil
 }
 
-func (s *Action) deleteRecursive(ctx context.Context, name string, force bool) error {
+func (s *secretHandler) deleteRecursive(ctx context.Context, name string, force bool) error {
 	if !force { // don't check if it's force anyway.
 		if (s.Store.Exists(ctx, name) || s.Store.IsDir(ctx, name)) && !termio.AskForConfirmation(ctx, fmt.Sprintf("☠ Are you sure you would like to recursively delete %q?", name)) {
 			return nil
@@ -103,17 +116,17 @@ func (s *Action) deleteRecursive(ctx context.Context, name string, force bool) e
 }
 
 // deleteKeyFromYAML deletes a single key from YAML.
-func (s *Action) deleteKeyFromYAML(ctx context.Context, name, key string) error {
+func (s *secretHandler) deleteKeyFromYAML(ctx context.Context, name, key string) error {
 	sec, err := s.Store.Get(ctx, name)
 	if err != nil {
-		return exit.Error(exit.IO, err, "Can not delete key %q from %q: %s", key, name, err)
+		return exit.Error(exit.IO, err, "Cannot delete key %q from %q: %s", key, name, err)
 	}
 
 	sec.Del(key)
 
-	if err := s.Store.Set(ctxutil.WithCommitMessage(ctx, "Updated Key"), name, sec); err != nil {
+	if err := s.Store.Set(ctx, name, sec); err != nil {
 		if !errors.Is(err, store.ErrMeaninglessWrite) {
-			return exit.Error(exit.IO, err, "Can not delete key %q from %q: %s", key, name, err)
+			return exit.Error(exit.IO, err, "Cannot delete key %q from %q: %s", key, name, err)
 		}
 		out.Warningf(ctx, "No need to write: the YAML file does't seem to have the key to be deleted")
 	}

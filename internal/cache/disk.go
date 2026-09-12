@@ -1,3 +1,5 @@
+// Package cache proivdes a simple on disk cache for gopass.
+// It stores the data in a user specific directory.
 package cache
 
 import (
@@ -75,6 +77,8 @@ func (o *OnDisk) Get(key string) ([]string, error) {
 
 // Set adds an entry to the cache.
 func (o *OnDisk) Set(key string, value []string) error {
+	// we need to make sure not to log things here as plugin Identities' recipients
+	// can contain secret data
 	if err := o.ensureDir(); err != nil {
 		return err
 	}

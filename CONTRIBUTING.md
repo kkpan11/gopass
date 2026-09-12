@@ -40,9 +40,22 @@ will try to clarify it.
 
       Signed-off-by: Your Name <your@email.com>
 
-* The first line of the commit message, the subject line, should be prefix with a tag indicating the type of the change. These tags will be extracted and used to populate the changelog.
-  Valid `[TAG]`s are `[BREAKING]`, `[BUGFIX]`, `[CLEANUP]`, `[DEPRECATION]`,
-  `[DOCUMENTATION]`, `[ENHANCEMENT]`, `[FEATURE]`, `[TESTING]`, and `[UX]`.
+* Write every commit subject as a [Conventional Commit](https://www.conventionalcommits.org/en/v1.0.0/),
+  for example `fix(age): expand ~/ in age.ssh-key-path`. The accepted types and
+  scopes are listed in [docs/conventions.md](docs/conventions.md).
+
+  Conventional Commits governs the subject line; the Developer Certificate of
+  Origin adds a trailer. Both apply to every commit.
+
+* Write the pull request title as a valid Conventional Commit. Pull requests are
+  squash-merged, so the pull request title is the string that reaches the
+  changelog.
+
+## Conventions
+
+Commit messages, versioning, branch and tag names, and file naming are specified
+in [docs/conventions.md](docs/conventions.md). Read it before opening your first
+pull request.
 
 ## Building & Testing
 
@@ -51,9 +64,12 @@ will try to clarify it.
 * Run meta tests with: `make codequality`
 * Run integration tests `make test-integration`
 
-If any of the above don't work check out the [troubleshooting section](#troubleshooting-build).
+If any of the above don't work, check the troubleshooting information in the docs directory before opening an issue.
 
 ## Releasing
 
 See [docs/releases.md](docs/releases.md).
 
+Maintainers preparing release candidates should use signed tags named exactly
+`vX.Y.Z-rc.N` from the merged `release/vX.Y.Z-rc.N` branch so the GitHub release
+automation publishes them as prereleases.

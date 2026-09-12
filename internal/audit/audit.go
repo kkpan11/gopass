@@ -6,12 +6,12 @@ package audit
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path"
+	"slices"
 	"sync"
 	"time"
 
-	"github.com/gopasspw/gopass-hibp/pkg/hibp/api"
-	"github.com/gopasspw/gopass-hibp/pkg/hibp/dump"
 	"github.com/gopasspw/gopass/internal/backend"
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/hashsum"
@@ -20,10 +20,10 @@ import (
 	"github.com/gopasspw/gopass/pkg/debug"
 	"github.com/gopasspw/gopass/pkg/fsutil"
 	"github.com/gopasspw/gopass/pkg/gopass"
+	"github.com/gopasspw/gopass/pkg/hibp/api"
+	"github.com/gopasspw/gopass/pkg/hibp/dump"
 	"github.com/gopasspw/gopass/pkg/termio"
 	"github.com/muesli/crunchy"
-	"github.com/nbutton23/zxcvbn-go"
-	"golang.org/x/exp/maps"
 )
 
 type secretGetter interface {
@@ -62,27 +62,6 @@ func New(ctx context.Context, s secretGetter) *Auditor {
 			Description: "github.com/muesli/crunchy",
 			Validate: func(_ string, sec gopass.Secret) error {
 				return cv.Check(sec.Password())
-			},
-		},
-		{
-			Name:        "zxcvbn",
-			Description: "github.com/nbutton23/zxcvbn-go",
-			Validate: func(name string, sec gopass.Secret) error {
-				ui := make([]string, 0, len(sec.Keys())+1)
-				for _, k := range sec.Keys() {
-					pw, found := sec.Get(k)
-					if !found {
-						continue
-					}
-					ui = append(ui, pw)
-				}
-				ui = append(ui, name)
-				match := zxcvbn.PasswordStrength(sec.Password(), ui)
-				if match.Score < 3 {
-					return fmt.Errorf("weak password (%d / 4)", match.Score)
-				}
-
-				return nil
 			},
 		},
 		{
@@ -138,14 +117,20 @@ func (a *Auditor) Batch(ctx context.Context, secrets []string) (*Report, error) 
 	// https://github.com/gopasspw/gopass/pull/245
 	//
 	maxJobs := a.s.Concurrency()
-	if max := config.Int(ctx, "audit.concurrency"); max > 0 {
-		if maxJobs > max {
-			maxJobs = max
+	if maxVal := config.Int(ctx, "audit.concurrency"); maxVal > 0 {
+		if maxJobs > maxVal {
+			maxJobs = maxVal
 		}
 	}
 
 	// Spawn workers that run the auditing of all secrets concurrently.
 	debug.Log("launching %d audit workers", maxJobs)
+
+	bar := termio.NewProgressBar(int64(len(secrets)))
+	bar.Hidden = ctxutil.IsHidden(ctx)
+	a.pcb = func() {
+		bar.Inc()
+	}
 
 	done := make(chan struct{}, maxJobs)
 	for range maxJobs {
@@ -158,12 +143,6 @@ func (a *Auditor) Batch(ctx context.Context, secrets []string) (*Report, error) 
 		}
 		close(pending)
 	}()
-
-	bar := termio.NewProgressBar(int64(len(secrets)))
-	bar.Hidden = ctxutil.IsHidden(ctx)
-	a.pcb = func() {
-		bar.Inc()
-	}
 
 	for range maxJobs {
 		<-done
@@ -229,10 +208,7 @@ func (a *Auditor) auditSecret(ctx context.Context, secret string) {
 	// pass the secret to all validators.
 	var wg sync.WaitGroup
 	for _, v := range a.v {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
+		wg.Go(func() {
 			if err := v.Validate(secret, sec); err != nil {
 				a.r.AddFinding(secret, v.Name, err.Error(), "warning")
 
@@ -240,7 +216,7 @@ func (a *Auditor) auditSecret(ctx context.Context, secret string) {
 			}
 
 			a.r.AddFinding(secret, v.Name, "ok", "none")
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -269,7 +245,7 @@ func (a *Auditor) checkHIBP(ctx context.Context) error {
 
 	// look up all known sha1sums. The LookupBatch method will sort the
 	// input so we don't need to.
-	matches := scanner.LookupBatch(ctx, maps.Keys(a.r.sha1sums))
+	matches := scanner.LookupBatch(ctx, slices.Collect(maps.Keys(a.r.sha1sums)))
 	for _, m := range matches {
 		// map any match back to the secret(s).
 		secs, found := a.r.sha1sums[m]

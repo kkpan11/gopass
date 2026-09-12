@@ -25,10 +25,10 @@ func TestTTL(t *testing.T) {
 	c.now = nowFunc(0)
 
 	val, found := c.Get("foo")
-	assert.Equal(t, "", val)
+	assert.Empty(t, val)
 	assert.False(t, found)
 
-	c.Set("foo", "bar")
+	c.Set(t.Context(), "foo", "bar")
 	val, found = c.Get("foo")
 	assert.Equal(t, "bar", val)
 	assert.True(t, found)
@@ -42,28 +42,28 @@ func TestTTL(t *testing.T) {
 	c.now = nowFunc(6)
 
 	val, found = c.Get("foo")
-	assert.Equal(t, "", val)
+	assert.Empty(t, val)
 	assert.False(t, found)
 
-	c.Set("bar", "baz")
+	c.Set(t.Context(), "bar", "baz")
 	val, found = c.Get("bar")
 	assert.Equal(t, "baz", val)
 	assert.True(t, found)
 
 	c.Remove("bar")
 	val, found = c.Get("bar")
-	assert.Equal(t, "", val)
+	assert.Empty(t, val)
 	assert.False(t, found)
 
-	c.Set("foo", "bar")
-	c.Set("bar", "baz")
+	c.Set(t.Context(), "foo", "bar")
+	c.Set(t.Context(), "bar", "baz")
 	val, found = c.Get("bar")
 	assert.Equal(t, "baz", val)
 	assert.True(t, found)
 
 	c.Purge()
 	val, found = c.Get("bar")
-	assert.Equal(t, "", val)
+	assert.Empty(t, val)
 	assert.False(t, found)
 }
 
@@ -77,7 +77,7 @@ func TestPar(t *testing.T) {
 		for range 32 {
 			t.Run("set"+strconv.Itoa(i), func(t *testing.T) {
 				t.Parallel()
-				c.Set(i, i)
+				c.Set(t.Context(), i, i)
 				iv, found := c.Get(i)
 				assert.True(t, found)
 				assert.Equal(t, i, iv)

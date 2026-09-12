@@ -3,26 +3,23 @@ package main
 import (
 	"bytes"
 	"context"
-	"flag"
-	"fmt"
 	"os"
-	"runtime"
 	"testing"
 
-	"github.com/atotto/clipboard"
 	"github.com/blang/semver/v4"
 	"github.com/fatih/color"
+	"github.com/gopasspw/clipboard"
 	"github.com/gopasspw/gopass/internal/action"
 	"github.com/gopasspw/gopass/internal/backend"
 	"github.com/gopasspw/gopass/internal/backend/crypto/gpg"
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/out"
-	"github.com/gopasspw/gopass/internal/set"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
+	"github.com/gopasspw/gopass/pkg/set"
 	"github.com/gopasspw/gopass/tests/gptest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 func TestVersionPrinter(t *testing.T) {
@@ -31,12 +28,14 @@ func TestVersionPrinter(t *testing.T) {
 	buf := &bytes.Buffer{}
 	vp := makeVersionPrinter(buf, semver.Version{Major: 1})
 	vp(nil)
-	assert.Equal(t, fmt.Sprintf("gopass 1.0.0 %s %s %s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH), buf.String())
+
+	commit, _, _ := parseBuildInfo()
+
+	assert.Contains(t, buf.String(), "gopass 1.0.0")
+	assert.Contains(t, buf.String(), commit)
 }
 
 func TestGetVersion(t *testing.T) {
-	t.Parallel()
-
 	version = "1.9.0"
 
 	if getVersion().LT(semver.Version{Major: 1, Minor: 9}) {
@@ -45,8 +44,6 @@ func TestGetVersion(t *testing.T) {
 }
 
 func TestSetupApp(t *testing.T) {
-	t.Parallel()
-
 	ctx := config.NewContextInMemory()
 	_, app := setupApp(ctx, semver.Version{})
 	assert.NotNil(t, app)
@@ -57,6 +54,7 @@ func TestSetupApp(t *testing.T) {
 var commandsWithError = set.Map([]string{
 	".age.identities.add",
 	".age.identities.remove",
+	".age.lock",
 	".alias.add",
 	".alias.remove",
 	".alias.delete",
@@ -87,8 +85,9 @@ var commandsWithError = set.Map([]string{
 	".mounts.remove",
 	".move",
 	".otp",
+	".pull",
 	".process",
-	".rcs.status",
+	".push",
 	".recipients.add",
 	".recipients.remove",
 	".show",
@@ -97,6 +96,8 @@ var commandsWithError = set.Map([]string{
 	".templates.remove",
 	".templates.show",
 	".unclip",
+	".reorg",
+	".audit",
 })
 
 func TestGetCommands(t *testing.T) {
@@ -113,69 +114,115 @@ func TestGetCommands(t *testing.T) {
 	cfg := config.NewInMemory()
 	require.NoError(t, cfg.SetPath(u.StoreDir("")))
 
-	clipboard.Unsupported = true
+	clipboard.ForceUnsupported = true
 
 	ctx := config.NewContextInMemory()
 	ctx = ctxutil.WithAlwaysYes(ctx, true)
 	ctx = ctxutil.WithInteractive(ctx, false)
 	ctx = ctxutil.WithTerminal(ctx, false)
 	ctx = ctxutil.WithHidden(ctx, true)
-	ctx = backend.WithCryptoBackendString(ctx, "plain")
+	ctx, err := backend.WithCryptoBackendString(ctx, "plain")
+	require.NoError(t, err)
+	ctx = ctxutil.WithAgePassphrase(ctx, "foobar")
 
 	act, err := action.New(cfg, semver.Version{})
 	require.NoError(t, err)
 
-	app := cli.NewApp()
-	fs := flag.NewFlagSet("default", flag.ContinueOnError)
-	c := cli.NewContext(app, fs, nil)
-	c.Context = ctx
+	app := &cli.Command{
+		ExitErrHandler: func(_ context.Context, _ *cli.Command, _ error) {
+			// suppress os.Exit during testing
+		},
+	}
 
 	commands := getCommands(act, app)
-	assert.Len(t, commands, 41)
+	assert.Len(t, commands, 45)
 
 	prefix := ""
-	testCommands(t, c, commands, prefix)
+	testCommands(t, ctx, app, commands, prefix)
 }
 
-func testCommands(t *testing.T, c *cli.Context, commands []*cli.Command, prefix string) {
+func testCommands(t *testing.T, ctx context.Context, app *cli.Command, commands []*cli.Command, prefix string) {
 	t.Helper()
 
 	for _, cmd := range commands {
-		if cmd.Name == "update" {
+		if cmd.Name == "update" || cmd.Name == "agent" || cmd.Name == "doctor" {
 			continue
 		}
 
-		if len(cmd.Subcommands) > 0 {
-			testCommands(t, c, cmd.Subcommands, prefix+"."+cmd.Name)
+		if len(cmd.Commands) > 0 {
+			testCommands(t, ctx, app, cmd.Commands, prefix+"."+cmd.Name)
 		}
 
 		if cmd.Before != nil {
-			if err := cmd.Before(c); err != nil {
+			if _, err := runCmdBefore(ctx, cmd); err != nil {
 				continue
 			}
 		}
 
-		if cmd.BashComplete != nil {
-			cmd.BashComplete(c)
+		if cmd.ShellComplete != nil {
+			cmd.ShellComplete(ctx, cmd)
 		}
 
 		if cmd.Action != nil {
 			fullName := prefix + "." + cmd.Name
 			if _, found := commandsWithError[fullName]; found {
-				require.Error(t, cmd.Action(c), fullName)
+				require.Error(t, runCmdAction(ctx, cmd), "Command %s should fail", fullName)
 
 				continue
 			}
 
-			require.NoError(t, cmd.Action(c), fullName)
+			require.NoError(t, runCmdAction(ctx, cmd), "Command %s should not fail", fullName)
 		}
 	}
 }
 
-func TestInitContext(t *testing.T) {
-	t.Parallel()
+// runCmdAction invokes cmd.Action by running it through a parent cli.Command
+// so that parsedArgs and flags are properly initialized.
+func runCmdAction(ctx context.Context, cmd *cli.Command) error {
+	wrapper := &cli.Command{
+		ExitErrHandler: func(_ context.Context, _ *cli.Command, _ error) {
+			// suppress os.Exit during testing
+		},
+		Commands: []*cli.Command{cmd},
+	}
 
-	ctx := context.Background()
+	return wrapper.Run(ctx, []string{"test", cmd.Name}) //nolint:wrapcheck
+}
+
+// runCmdBefore invokes cmd.Before by running it through a parent cli.Command.
+func runCmdBefore(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+	var capturedCtx context.Context
+	var capturedErr error
+
+	origBefore := cmd.Before
+	cmd.Before = func(c context.Context, cmd *cli.Command) (context.Context, error) {
+		capturedCtx, capturedErr = origBefore(c, cmd)
+
+		return capturedCtx, capturedErr
+	}
+	// Use an action that does nothing so we can isolate the Before call
+	origAction := cmd.Action
+	cmd.Action = func(_ context.Context, _ *cli.Command) error { return nil }
+
+	wrapper := &cli.Command{
+		ExitErrHandler: func(_ context.Context, _ *cli.Command, _ error) {},
+		Commands:       []*cli.Command{cmd},
+	}
+	_ = wrapper.Run(ctx, []string{"test", cmd.Name})
+
+	// Restore original handlers
+	cmd.Before = origBefore
+	cmd.Action = origAction
+
+	if capturedCtx == nil {
+		capturedCtx = ctx
+	}
+
+	return capturedCtx, capturedErr
+}
+
+func TestInitContext(t *testing.T) {
+	ctx := t.Context()
 	cfg := config.NewInMemory()
 
 	ctx = initContext(ctx, cfg)

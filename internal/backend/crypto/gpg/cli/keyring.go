@@ -8,7 +8,6 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/gopasspw/gopass/internal/backend/crypto/gpg"
 	"github.com/gopasspw/gopass/internal/backend/crypto/gpg/colons"
 	"github.com/gopasspw/gopass/internal/out"
@@ -17,12 +16,16 @@ import (
 
 // listKey lists all keys of the given type and matching the search strings.
 func (g *GPG) listKeys(ctx context.Context, typ string, search ...string) (gpg.KeyList, error) {
+	debug.Log("listing %s keys for %v", typ, search)
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
 
-	args := []string{"--with-colons", "--with-fingerprint", "--fixed-list-mode", "--list-" + typ + "-keys"}
+	args := make([]string, 0, 4+len(search))
+	args = append(args, "--with-colons", "--with-fingerprint", "--fixed-list-mode", "--list-"+typ+"-keys")
 	args = append(args, search...)
 	if e, found := g.listCache.Get(strings.Join(args, ",")); found && gpg.UseCache(ctx) {
+		debug.Log("listed cached keys: %q", strings.Join(e.Recipients(), ","))
+
 		return e, nil
 	}
 
@@ -30,18 +33,24 @@ func (g *GPG) listKeys(ctx context.Context, typ string, search ...string) (gpg.K
 	errBuf := bytes.Buffer{}
 	cmd.Stderr = &errBuf
 
-	debug.Log("%s %+v\n", cmd.Path, cmd.Args)
+	debug.V(1).Log("%s %+v\n", cmd.Path, cmd.Args)
 	cmdout, err := cmd.Output()
 	if err != nil {
-		if bytes.Contains(cmdout, []byte("secret key not available")) {
+		if bytes.Contains(cmdout, []byte("secret key not available")) || bytes.Contains(errBuf.Bytes(), []byte("No secret key")) {
+			debug.Log("secret key not available for %v", search)
+
 			return gpg.KeyList{}, nil
 		}
+		errStr := fmt.Errorf("%w: %s|%s", err, cmdout, errBuf.String())
+		debug.Log("cmd error listing %s keys: %q", typ, errStr)
 
-		return gpg.KeyList{}, fmt.Errorf("%w: %s|%s", err, cmdout, errBuf.String())
+		return gpg.KeyList{}, errStr
 	}
 
 	kl := colons.Parse(bytes.NewBuffer(cmdout))
 	g.listCache.Add(strings.Join(args, ","), kl)
+
+	debug.Log("listed non-cached keys: %q", strings.Join(kl.Recipients(), ","))
 
 	return kl, nil
 }
@@ -91,20 +100,55 @@ func (g *GPG) FormatKey(ctx context.Context, id, tpl string) string {
 	return buf.String()
 }
 
-// ReadNamesFromKey unmarshals and returns the names associated with the given public key.
-func (g *GPG) ReadNamesFromKey(ctx context.Context, buf []byte) ([]string, error) {
-	el, err := openpgp.ReadArmoredKeyRing(bytes.NewReader(buf))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read key ring: %w", err)
+// FormatKeys formats multiple key IDs using bulk keyring lookups.
+func (g *GPG) FormatKeys(ctx context.Context, ids []string) map[string]string {
+	formatted := make(map[string]string, len(ids))
+	if g.privKeys == nil {
+		g.privKeys, _ = g.listKeys(ctx, "secret")
+	}
+	if g.pubKeys == nil {
+		g.pubKeys, _ = g.listKeys(ctx, "public")
 	}
 
-	if len(el) != 1 {
+	for _, id := range ids {
+		if k, err := g.privKeys.FindKey(id); err == nil {
+			formatted[id] = k.OneLine()
+
+			continue
+		}
+		if k, err := g.pubKeys.FindKey(id); err == nil {
+			formatted[id] = k.OneLine()
+		}
+	}
+
+	return formatted
+}
+
+// ReadNamesFromKey unmarshals and returns the names associated with the given public key.
+func (g *GPG) ReadNamesFromKey(ctx context.Context, buf []byte) ([]string, error) {
+	if len(buf) < 1 {
+		return nil, fmt.Errorf("empty input")
+	}
+
+	args := append(g.args, "--with-colons", "--show-keys")
+	cmd := exec.CommandContext(ctx, g.binary, args...)
+	cmd.Stdin = bytes.NewReader(buf)
+	errBuf := &bytes.Buffer{}
+	cmd.Stderr = errBuf
+
+	cmdout, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to run command '%s %+v': %w - %s", cmd.Path, cmd.Args, err, errBuf.String())
+	}
+
+	kl := colons.Parse(bytes.NewBuffer(cmdout))
+	if len(kl) != 1 {
 		return nil, fmt.Errorf("public Key must contain exactly one Entity")
 	}
 
-	names := make([]string, 0, len(el[0].Identities))
-	for _, v := range el[0].Identities {
-		names = append(names, v.Name)
+	names := make([]string, 0, len(kl[0].Identities))
+	for _, v := range kl[0].Identities {
+		names = append(names, v.ID())
 	}
 
 	return names, nil
@@ -136,6 +180,31 @@ func (g *GPG) ImportPublicKey(ctx context.Context, buf []byte) error {
 	g.pubKeys = nil
 
 	return nil
+}
+
+// GetFingerprint returns the fingerprint of a key.
+func (g *GPG) GetFingerprint(ctx context.Context, buf []byte) (string, error) {
+	if len(buf) < 1 {
+		return "", fmt.Errorf("empty input")
+	}
+
+	args := append(g.args, "--with-colons", "--show-keys")
+	cmd := exec.CommandContext(ctx, g.binary, args...)
+	cmd.Stdin = bytes.NewReader(buf)
+	errBuf := &bytes.Buffer{}
+	cmd.Stderr = errBuf
+
+	cmdout, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to run command '%s %+v': %w - %s", cmd.Path, cmd.Args, err, errBuf.String())
+	}
+
+	kl := colons.Parse(bytes.NewBuffer(cmdout))
+	if len(kl) != 1 {
+		return "", fmt.Errorf("public Key must contain exactly one Entity")
+	}
+
+	return strings.ToUpper(kl[0].Fingerprint), nil
 }
 
 // ExportPublicKey will export the named public key to the location given.

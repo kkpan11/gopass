@@ -3,7 +3,6 @@ package plain
 import (
 	"testing"
 
-	"github.com/blang/semver/v4"
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/stretchr/testify/assert"
@@ -39,7 +38,8 @@ func TestPlain(t *testing.T) {
 
 	assert.Equal(t, "gpg", m.Binary())
 
-	require.Error(t, m.GenerateIdentity(ctx, "", "", ""))
+	_, err = m.GenerateIdentity(ctx, "", "", "")
+	require.Error(t, err)
 
 	kl, err = m.FindRecipients(ctx)
 	require.NoError(t, err)
@@ -53,10 +53,9 @@ func TestPlain(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, m.ImportPublicKey(ctx, buf))
-	assert.Equal(t, semver.Version{}, m.Version(ctx))
 
-	assert.Equal(t, "", m.FormatKey(ctx, "", ""))
-	assert.Equal(t, "", m.Fingerprint(ctx, ""))
+	assert.Empty(t, m.FormatKey(ctx, "", ""))
+	assert.Empty(t, m.Fingerprint(ctx, ""))
 	require.NoError(t, m.Initialized(ctx))
 	assert.Equal(t, "plain", m.Name())
 	assert.Equal(t, "txt", m.Ext())

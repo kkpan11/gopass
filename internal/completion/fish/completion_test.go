@@ -1,12 +1,11 @@
 package fish
 
 import (
-	"flag"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 type unknownFlag struct{}
@@ -15,7 +14,19 @@ func (u *unknownFlag) String() string {
 	return ""
 }
 
-func (u *unknownFlag) Apply(*flag.FlagSet) error {
+func (u *unknownFlag) Get() any {
+	return nil
+}
+
+func (u *unknownFlag) PreParse() error {
+	return nil
+}
+
+func (u *unknownFlag) PostParse() error {
+	return nil
+}
+
+func (u *unknownFlag) Set(string, string) error {
 	return nil
 }
 
@@ -57,7 +68,7 @@ func TestFormatFlag(t *testing.T) {
 func TestGetCompletion(t *testing.T) {
 	t.Parallel()
 
-	app := cli.NewApp()
+	app := &cli.Command{}
 	sv, err := GetCompletion(app)
 	require.NoError(t, err)
 	assert.Contains(t, sv, "#!/usr/bin/env fish")
@@ -91,7 +102,7 @@ func TestFormatflagFunc(t *testing.T) {
 	} {
 		sv, err := formatFlagFunc("short")(flag)
 		require.NoError(t, err)
-		assert.Equal(t, "", sv)
+		assert.Empty(t, sv)
 
 		sv, err = formatFlagFunc("long")(flag)
 		require.NoError(t, err)
@@ -104,13 +115,13 @@ func TestFormatflagFunc(t *testing.T) {
 
 	sv, err := formatFlagFunc("short")(&unknownFlag{})
 	require.Error(t, err)
-	assert.Equal(t, "", sv)
+	assert.Empty(t, sv)
 
 	sv, err = formatFlagFunc("long")(&unknownFlag{})
 	require.Error(t, err)
-	assert.Equal(t, "", sv)
+	assert.Empty(t, sv)
 
 	sv, err = formatFlagFunc("usage")(&unknownFlag{})
 	require.Error(t, err)
-	assert.Equal(t, "", sv)
+	assert.Empty(t, sv)
 }

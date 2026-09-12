@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -12,9 +13,9 @@ import (
 	"time"
 
 	"github.com/gopasspw/gopass/internal/out"
-	"github.com/gopasspw/gopass/internal/set"
 	"github.com/gopasspw/gopass/internal/tpl"
 	"github.com/gopasspw/gopass/pkg/debug"
+	"github.com/gopasspw/gopass/pkg/set"
 )
 
 func (r *Report) PrintResults(ctx context.Context) error {
@@ -30,7 +31,7 @@ func (r *Report) PrintResults(ctx context.Context) error {
 	for _, name := range set.SortedKeys(r.Secrets) {
 		s := r.Secrets[name]
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("%s (age: %s) ", name, s.HumanizeAge()))
+		fmt.Fprintf(&sb, "%s (age: %s) ", name, s.HumanizeAge())
 		if !s.HasFindings() {
 			sb.WriteString("OK")
 			out.OK(ctx, sb.String())
@@ -47,7 +48,7 @@ func (r *Report) PrintResults(ctx context.Context) error {
 			case "error":
 				fallthrough
 			case "warning":
-				sb.WriteString(fmt.Sprintf("%s: %s. ", k, v.Message))
+				fmt.Fprintf(&sb, "%s: %s. ", k, v.Message)
 			default:
 				continue
 			}
@@ -125,6 +126,24 @@ func (r *Report) RenderCSV(w io.Writer) error {
 	cw.Flush()
 
 	return cw.Error()
+}
+
+// RenderJSON writes the report as a JSON object to w.
+func (r *Report) RenderJSON(w io.Writer) error {
+	type jsonReport struct {
+		Duration string                  `json:"duration"`
+		Secrets  map[string]SecretReport `json:"secrets"`
+	}
+
+	payload := jsonReport{
+		Duration: r.Duration.Round(time.Millisecond).String(),
+		Secrets:  r.Secrets,
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+
+	return enc.Encode(payload)
 }
 
 func (r *Report) RenderHTML(w io.Writer) error {

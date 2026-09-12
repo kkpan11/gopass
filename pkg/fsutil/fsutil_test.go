@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -30,22 +29,23 @@ func TestCleanPath(t *testing.T) {
 	tempdir := t.TempDir()
 	t.Setenv("GOPASS_HOMEDIR", "")
 
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "~"
+	}
+
 	m := map[string]string{
 		".":                                 "",
 		"/home/user/../bob/.password-store": "/home/bob/.password-store",
 		"/home/user//.password-store":       "/home/user/.password-store",
 		tempdir + "/foo.gpg":                tempdir + "/foo.gpg",
-		"~/.password-store":                 "~/.password-store",
+		"~/.password-store":                 home + "/.password-store",
 	}
 
 	for in, out := range m {
 		got := CleanPath(in)
 
 		if strings.HasPrefix(out, "~") {
-			// skip these tests on windows
-			if runtime.GOOS == "windows" {
-				continue
-			}
 			assert.Equal(t, out, got)
 
 			continue
@@ -55,6 +55,39 @@ func TestCleanPath(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, absOut, got)
 	}
+}
+
+func TestCleanPathWithGopassHomedir(t *testing.T) {
+	tempdir := t.TempDir()
+	t.Setenv("GOPASS_HOMEDIR", tempdir)
+
+	// ~/.local/... must expand to $GOPASS_HOMEDIR/.local/..., not $GOPASS_HOMEDIR.local/...
+	assert.Equal(t, filepath.Join(tempdir, ".local", "share"), CleanPath("~/.local/share"))
+	assert.Equal(t, filepath.Join(tempdir, ".password-store"), CleanPath("~/.password-store"))
+}
+
+func TestShrinkPath(t *testing.T) {
+	tempdir := t.TempDir()
+
+	t.Run("with GOPASS_HOMEDIR", func(t *testing.T) {
+		t.Setenv("GOPASS_HOMEDIR", tempdir)
+
+		assert.Equal(t, "~/.local/share/gopass", ShrinkPath(filepath.Join(tempdir, ".local", "share", "gopass")))
+		assert.Equal(t, "~/.password-store", ShrinkPath(filepath.Join(tempdir, ".password-store")))
+		// path outside GOPASS_HOMEDIR should be returned as-is
+		assert.Equal(t, "/tmp/other", ShrinkPath("/tmp/other"))
+	})
+
+	t.Run("without GOPASS_HOMEDIR", func(t *testing.T) {
+		t.Setenv("GOPASS_HOMEDIR", "")
+
+		home, err := os.UserHomeDir()
+		require.NoError(t, err)
+
+		assert.Equal(t, "~/.local/share/gopass", ShrinkPath(filepath.Join(home, ".local", "share", "gopass")))
+		// path outside home dir should be returned as-is
+		assert.Equal(t, "/tmp/other", ShrinkPath("/tmp/other"))
+	})
 }
 
 func TestIsDir(t *testing.T) {

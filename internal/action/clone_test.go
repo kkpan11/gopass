@@ -14,7 +14,6 @@ import (
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/out"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
-	"github.com/gopasspw/gopass/pkg/termio"
 	"github.com/gopasspw/gopass/tests/gptest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,7 +65,7 @@ func TestClone(t *testing.T) {
 	t.Run("no args", func(t *testing.T) {
 		defer buf.Reset()
 		c := gptest.CliCtx(ctx, t)
-		require.Error(t, act.Clone(c))
+		require.Error(t, act.Clone(ctx, c))
 	})
 
 	t.Run("clone to initialized store", func(t *testing.T) {
@@ -107,12 +106,13 @@ func TestCloneBackendIsStoredForMount(t *testing.T) {
 	ctx = act.cfg.WithConfig(ctx)
 
 	c := gptest.CliCtx(ctx, t)
-	require.NoError(t, act.IsInitialized(c))
+	_, err = act.IsInitialized(ctx, c)
+	require.NoError(t, err)
 
 	repo := aGitRepo(ctx, t, u, "my-project")
 
 	c = gptest.CliCtxWithFlags(ctx, t, map[string]string{"check-keys": "false"}, repo, "the-project")
-	require.NoError(t, act.Clone(c))
+	require.NoError(t, act.Clone(ctx, c))
 
 	require.Contains(t, act.cfg.Mounts(), "the-project")
 }
@@ -120,10 +120,9 @@ func TestCloneBackendIsStoredForMount(t *testing.T) {
 func TestCloneGetGitConfig(t *testing.T) {
 	u := gptest.NewUnitTester(t)
 
-	r1 := gptest.UnsetVars(termio.NameVars...)
-	defer r1()
-	r2 := gptest.UnsetVars(termio.EmailVars...)
-	defer r2()
+	for _, k := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "DEBFULLNAME", "DEBEMAIL", "USER", "EMAIL"} {
+		t.Setenv(k, "")
+	}
 
 	ctx := config.NewContextInMemory()
 	ctx = ctxutil.WithAlwaysYes(ctx, true)
@@ -166,7 +165,8 @@ func TestCloneCheckDecryptionKeys(t *testing.T) {
 	ctx = act.cfg.WithConfig(ctx)
 
 	c := gptest.CliCtx(ctx, t)
-	require.NoError(t, act.IsInitialized(c))
+	_, err = act.IsInitialized(ctx, c)
+	require.NoError(t, err)
 
 	repo := aGitRepo(ctx, t, u, "my-project")
 
@@ -175,7 +175,7 @@ func TestCloneCheckDecryptionKeys(t *testing.T) {
 	}
 
 	c = gptest.CliCtxWithFlags(ctx, t, map[string]string{"check-keys": "true"}, repo, "the-project")
-	require.NoError(t, act.Clone(c))
+	require.NoError(t, act.Clone(ctx, c))
 
 	require.Contains(t, act.cfg.Mounts(), "the-project")
 }

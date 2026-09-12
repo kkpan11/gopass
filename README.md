@@ -6,22 +6,25 @@
 
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/gopasspw/gopass/badge)](https://securityscorecards.dev/viewer/?uri=github.com/gopasspw/gopass)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/gopasspw/gopass/build.yml?branch=master)](https://github.com/gopasspw/gopass/actions/workflows/build.yml?query=branch%3Amaster)
-[![Packaging status](https://repology.org/badge/tiny-repos/gopass-gopasspw.svg)](https://repology.org/project/gopass-gopasspw/versions)
+[![Lint Status](https://img.shields.io/github/actions/workflow/status/gopasspw/gopass/golangci-lint.yml?branch=master&label=lint)](https://github.com/gopasspw/gopass/actions/workflows/golangci-lint.yml?query=branch%3Amaster)
+[![Packaging Status](https://repology.org/badge/tiny-repos/gopass-gopasspw.svg)](https://repology.org/project/gopass-gopasspw/versions)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/gopasspw/gopass/blob/master/LICENSE)
 [![Github All Releases](https://img.shields.io/github/downloads/gopasspw/gopass/total.svg)](https://github.com/gopasspw/gopass/releases)
 [![Gopass Slack](https://img.shields.io/badge/%23gopass-Slack-brightgreen)](https://join.slack.com/t/gopassworkspace/shared_invite/zt-17jl74b5x-U1OUW4ts4AQ7eAf2V4QaaQ)
 
 > The slightly more awesome standard UNIX password manager for teams.
 
-Manage your credentials with ease. In a globally distributed team, on multiple devices or fully offline on an air gapped machine.
+Manage your credentials with ease. In a globally distributed team, on multiple devices or fully offline on an air-gapped machine.
 
-- **Works everywhere** - The same user experience on Linux, MacOS, *BSD or Windows
+- **Works everywhere** - The same user experience on Linux, macOS, *BSD or Windows
 - **Built for teams** - Built from our experience working in distributed development teams
 - **Full autonomy** - No network connectivity required, unless you want it
 
 # How Does It Work?
 
+Gopass is a drop-in replacement for pass, the standard UNIX password manager.
 By default your credentials are encrypted with GPG and versioned in git. This can be customized easily.
+Other backends for encryption (e.g. age) and storage (e.g. fossil) are also available.
 The primary interface is the command line, making it an excellent choice for CLI fans, CI/CD systems or
 anything you can hook it up with. Gopass can also integrate with your browser so you can largely avoid
 the command line - if you want.
@@ -35,7 +38,7 @@ An external editor is required to use `gopass edit`.
 
 ## Installation through package managers
 
-### [Homebrew](https://brew.sh) (Linux/MacOS)
+### [Homebrew](https://brew.sh) (Linux/macOS)
 
 [![homebrew version](https://img.shields.io/homebrew/v/gopass)](https://github.com/Homebrew/homebrew-core/blob/master/Formula/gopass.rb)
 
@@ -53,7 +56,7 @@ sudo port install gopass
 
 ### Debian (Ubuntu, Debian, Raspbian, ...)
 
-**Warning**: Do not install the `gopass` package for the official repositories. That is a completely different project that has no relation to us.
+**Warning**: Do not install the `gopass` package from the official repositories. That is a completely different project that has no relation to us.
 
 ```shell
 curl https://packages.gopass.pw/repos/gopass/gopass-archive-keyring.gpg | sudo tee /usr/share/keyrings/gopass-archive-keyring.gpg >/dev/null

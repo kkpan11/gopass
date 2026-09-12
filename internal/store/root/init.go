@@ -86,12 +86,16 @@ func (r *Store) initialize(ctx context.Context) error {
 
 	debug.Log("Root Store initialized at %s", path)
 
+	if r.importCallback != nil {
+		s.SetImportFunc(r.importCallback)
+	}
+
 	r.store = s
 
 	// initialize all mounts
 	for _, alias := range r.cfg.Mounts() {
 		path := fsutil.CleanPath(r.cfg.MountPath(alias))
-		if err := r.addMount(ctx, alias, path); err != nil {
+		if err := r.addMount(ctx, alias, path, false); err != nil {
 			out.Errorf(ctx, "Failed to initialize mount %s (%s). Ignoring: %s", alias, path, err)
 
 			continue

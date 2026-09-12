@@ -30,7 +30,7 @@ const (
 // AskForPrivateKey prompts the user to select from a list of private keys.
 func AskForPrivateKey(ctx context.Context, crypto backend.Crypto, prompt string) (string, error) {
 	if crypto == nil {
-		return "", fmt.Errorf("can not select private key without valid crypto backend")
+		return "", fmt.Errorf("cannot select private key without valid crypto backend")
 	}
 
 	kl, err := crypto.ListIdentities(ctx)
@@ -48,6 +48,7 @@ func AskForPrivateKey(ctx context.Context, crypto backend.Crypto, prompt string)
 	}
 
 	fmtStr := "[%" + strconv.Itoa((len(kl)/10)+1) + "d] %s - %s\n"
+	formatted := crypto.FormatKeys(ctx, kl)
 	for range maxTries {
 		if !ctxutil.IsTerminal(ctx) || !ctxutil.IsInteractive(ctx) {
 			return kl[0], nil
@@ -61,7 +62,7 @@ func AskForPrivateKey(ctx context.Context, crypto backend.Crypto, prompt string)
 
 		fmt.Fprintln(Stdout, prompt)
 		for i, k := range kl {
-			fmt.Fprintf(Stdout, fmtStr, i, crypto.Name(), crypto.FormatKey(ctx, k, ""))
+			fmt.Fprintf(Stdout, fmtStr, i, crypto.Name(), formatted[k])
 		}
 
 		iv, err := termio.AskForInt(ctx, fmt.Sprintf("Please enter the number of a key (0-%d, [q]uit)", len(kl)-1), 0)
@@ -158,8 +159,10 @@ func AskForStore(ctx context.Context, s mountPointer) string {
 		return ""
 	}
 
-	stores := []string{"<root>"}
-	stores = append(stores, sorted(s.MountPoints())...)
+	mp := s.MountPoints()
+	stores := make([]string, 0, 1+len(mp))
+	stores = append(stores, "<root>")
+	stores = append(stores, sorted(mp)...)
 	if len(stores) < 2 {
 		return ""
 	}

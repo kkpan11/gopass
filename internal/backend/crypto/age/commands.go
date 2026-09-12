@@ -1,33 +1,184 @@
 package age
 
 import (
+	"context"
 	"fmt"
+	"strings"
 
 	"filippo.io/age"
 	"github.com/gopasspw/gopass/internal/action/exit"
+	"github.com/gopasspw/gopass/internal/backend/crypto/age/agent"
+	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/out"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
-	"github.com/urfave/cli/v2"
+	"github.com/gopasspw/gopass/pkg/debug"
+	"github.com/gopasspw/gopass/pkg/termio"
+	"github.com/urfave/cli/v3"
 )
 
+//nolint:cyclop
 func (l loader) Commands() []*cli.Command {
 	return []*cli.Command{
 		{
 			Name:   name,
-			Hidden: true,
+			Hidden: false,
 			Usage:  "age commands",
 			Description: "" +
 				"Built-in commands for the age backend.\n" +
-				"These allow limited interactions with the gopass specific age identities.",
-			Subcommands: []*cli.Command{
+				"These allow limited interactions with the gopass specific age identities.\n " +
+				"Added identities are automatically added as recipient to your secrets when encrypting, but not to" +
+				"your recipients, make sure to keep your recipients and identities in sync as you want to.\n" +
+				"All age identities, including plugin ones should be supported. We also still support github" +
+				"identities despite them being deprecated by age, we do so by falling back to the ssh identities" +
+				"for these and keeping a local cache of ssh keys for a given github identity.",
+			Flags: []cli.Flag{
+				&cli.BoolFlag{
+					Name:  "age-sshkeys",
+					Usage: "Load SSH keys from default SSH directory",
+				},
+				&cli.StringFlag{
+					Name:    "age-ssh-key-path",
+					Usage:   "Custom path to additional SSH key or directory of keys for age backend",
+					Sources: cli.EnvVars("GOPASS_SSH_DIR"),
+				},
+			},
+			Commands: []*cli.Command{
+				{
+					Name:  "agent",
+					Usage: "Manage the age agent",
+					Description: "Manage the age agent, this will start a background process that will cache your age identities in memory and provide them to gopass on demand. " +
+						"This is optional, but recommended if you use age identities that require a password or are managed by a plugin.",
+					Action: func(ctx context.Context, cmd *cli.Command) error {
+						if err := cli.ShowSubcommandHelp(cmd); err != nil {
+							return exit.Error(exit.Unknown, err, "failed to show help")
+						}
+
+						return exit.Error(exit.Usage, nil, "Please specify a subcommand")
+					},
+					Commands: []*cli.Command{
+						{
+							Name:        "start",
+							Usage:       "Start the age agent",
+							Description: "Start the age agent",
+							Action:      l.agent,
+						},
+						{
+							Name:        "stop",
+							Usage:       "Stop the age agent",
+							Description: "Stop the age agent",
+							Action: func(ctx context.Context, cmd *cli.Command) error {
+								ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+								client := agent.NewClient()
+								if err := client.Quit(); err != nil {
+									return exit.Error(exit.Unknown, err, "failed to stop agent: %s", err)
+								}
+								out.Printf(ctx, "Age agent asked to stop")
+
+								return nil
+							},
+						},
+						{
+							Name:        "status",
+							Usage:       "Check if the age agent is running, this will return 0 if the agent is running and 1 otherwise",
+							Description: "Check if the age agent is running, this will return 0 if the agent is running and 1 otherwise",
+							Action: func(ctx context.Context, cmd *cli.Command) error {
+								ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+								client := agent.NewClient()
+								status, err := client.Status()
+								if err != nil {
+									out.Printf(ctx, "Age agent is not running")
+
+									return exit.Error(exit.Unknown, err, "agent not running")
+								}
+								out.Printf(ctx, "Age agent is running")
+								if status == "locked" {
+									out.Printf(ctx, " (locked)")
+								}
+
+								return nil
+							},
+						},
+						{
+							Name:        "unlock",
+							Usage:       "Unlock the age agent",
+							Description: "Unlock the age agent and reload identities (will prompt for PIN)",
+							Action: func(ctx context.Context, cmd *cli.Command) error {
+								ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+								loadSSHKeys := config.Bool(ctx, "age.sshkeys")
+								if bv := cmd.Bool("age-sshkeys"); bv {
+									loadSSHKeys = bv
+								}
+								sshKeyPath := config.String(ctx, "age.ssh-key-path")
+								if sv := cmd.String("age-ssh-key-path"); sv != "" {
+									sshKeyPath = sv
+								}
+								a, err := New(ctx, loadSSHKeys, sshKeyPath)
+								if err != nil {
+									return exit.Error(exit.Unknown, err, "failed to create age backend")
+								}
+
+								// Load identities first (will prompt for PIN if needed)
+								ids, err := a.getAllIds(ctx)
+								if err != nil {
+									return exit.Error(exit.Unknown, err, "failed to get identities: %s", err)
+								}
+
+								sIds, err := a.identitiesToString(ids)
+								if err != nil {
+									return exit.Error(exit.Unknown, err, "failed to serialize identities: %s", err)
+								}
+
+								client := agent.NewClient()
+
+								// Send identities to agent (works even if agent is locked). If no
+								// natively serializable identities exist (e.g. only SSH keys, which
+								// cannot be transferred over the wire), skip the send but still unlock.
+								if sIds != "" {
+									if err := client.SendIdentities(sIds); err != nil {
+										return exit.Error(exit.Unknown, err, "failed to send identities to agent: %s", err)
+									}
+								}
+
+								// Only unlock the agent AFTER identities have been sent
+								if err := client.Unlock(); err != nil {
+									return exit.Error(exit.Unknown, err, "failed to unlock agent: %s", err)
+								}
+
+								if timeout := config.AsInt(config.String(ctx, "age.agent-timeout")); timeout > 0 {
+									if err := client.SetTimeout(timeout); err != nil {
+										return exit.Error(exit.Unknown, err, "failed to set agent timeout: %s", err)
+									}
+								}
+
+								out.Printf(ctx, "Age agent unlocked and identities reloaded")
+
+								return nil
+							},
+						},
+						{
+							Name:        "lock",
+							Usage:       "Lock the age agent",
+							Description: "Lock the age agent",
+							Action:      l.lock,
+						},
+					},
+				},
 				{
 					Name:  "identities",
-					Usage: "List identities",
+					Usage: "List age identities used for decryption and encryption",
 					Description: "" +
 						"List identities",
-					Action: func(c *cli.Context) error {
-						ctx := ctxutil.WithGlobalFlags(c)
-						a, err := New(ctx)
+					Action: func(ctx context.Context, cmd *cli.Command) error {
+						ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+						loadSSHKeys := config.Bool(ctx, "age.sshkeys")
+						if bv := cmd.Bool("age-sshkeys"); bv {
+							loadSSHKeys = bv
+						}
+						sshKeyPath := config.String(ctx, "age.ssh-key-path")
+						if sv := cmd.String("age-ssh-key-path"); sv != "" {
+							sshKeyPath = sv
+						}
+						a, err := New(ctx, loadSSHKeys, sshKeyPath)
 						if err != nil {
 							return exit.Error(exit.Unknown, err, "failed to create age backend")
 						}
@@ -41,64 +192,284 @@ func (l loader) Commands() []*cli.Command {
 							out.Notice(ctx, "No identities found")
 						}
 
-						for _, id := range recipientsToBech32(ids) {
-							out.Printf(ctx, id)
+						for _, id := range recipientsToString(ids) {
+							out.Print(ctx, out.Secret(id))
 						}
 
 						return nil
 					},
-					Subcommands: []*cli.Command{
+					Commands: []*cli.Command{
 						{
 							Name:  "add",
-							Usage: "Add an identity",
+							Usage: "Add an existing age identity",
 							Description: "" +
-								"Add an identity",
-							Action: func(c *cli.Context) error {
-								ctx := ctxutil.WithGlobalFlags(c)
-								a, err := New(ctx)
+								"Add an existing age identity, interactively",
+							Action: func(ctx context.Context, cmd *cli.Command) error {
+								ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+								loadSSHKeys := config.Bool(ctx, "age.sshkeys")
+								if bv := cmd.Bool("age-sshkeys"); bv {
+									loadSSHKeys = bv
+								}
+								sshKeyPath := config.String(ctx, "age.ssh-key-path")
+								if sv := cmd.String("age-ssh-key-path"); sv != "" {
+									sshKeyPath = sv
+								}
+								a, err := New(ctx, loadSSHKeys, sshKeyPath)
 								if err != nil {
 									return exit.Error(exit.Unknown, err, "failed to create age backend")
 								}
 
-								if err := a.GenerateIdentity(ctx, "", "", ""); err != nil {
-									return exit.Error(exit.Unknown, err, "failed to generate age identity")
+								idS, recEncm := cmd.Args().Get(0), cmd.Args().Get(1)
+
+								if len(idS) < 1 {
+									idS, err = termio.AskForPassword(ctx, "the age identity starting in AGE-", false)
+									if err != nil {
+										return exit.Error(exit.Unknown, err, "failed to read age identity")
+									}
 								}
+								if len(recEncm) < 1 && !strings.HasPrefix(idS, "AGE-SECRET-KEY-1") {
+									recEncm, err = termio.AskForString(ctx, "Provide the corresponding age recipient", "")
+									if err != nil {
+										return exit.Error(exit.Unknown, err, "failed to read corresponding age recipient")
+									}
+									if recEncm == "" {
+										return exit.Error(exit.Usage, nil, "recipient must not be empty for plugin identities")
+									}
+									if strings.HasPrefix(recEncm, "AGE-") {
+										out.Warning(ctx, "You have provided an identity as a recipient, recipients should start in 'age1', this might not be properly supported and might leak secret data in our identity recipient cache")
+									}
+								}
+
+								id, err := parseIdentity(idS + "|" + recEncm)
+								if err != nil {
+									return exit.Error(exit.Unknown, err, "failed to parse age identity")
+								}
+
+								err = a.addIdentity(ctx, id)
+								if err != nil {
+									return exit.Error(exit.Unknown, err, "failed to save age identity")
+								}
+
+								rec := IdentityToRecipient(id)
+								out.Noticef(ctx, "New age identities are not automatically added to your recipient list, consider adding it using 'gopass recipients add %s'", rec)
+								out.Warning(ctx, "If you do not add this recipient to the recipient list, make sure to re-encrypt using 'gopass fsck --decrypt' to properly support this identity")
 
 								return nil
 							},
 						},
 						{
-							Name:  "remove",
-							Usage: "Remove an identity",
+							Name:  "keygen",
+							Usage: "Generate a new age identity",
 							Description: "" +
-								"Remove an identity",
-							Action: func(c *cli.Context) error {
-								ctx := ctxutil.WithGlobalFlags(c)
-								a, err := New(ctx)
+								"Generate a new age identity",
+							Flags: []cli.Flag{
+								&cli.StringFlag{
+									Name:  "password",
+									Usage: "Password for the new key",
+								},
+							},
+							Action: func(ctx context.Context, cmd *cli.Command) error {
+								ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+								loadSSHKeys := config.Bool(ctx, "age.sshkeys")
+								if bv := cmd.Bool("age-sshkeys"); bv {
+									loadSSHKeys = bv
+								}
+								sshKeyPath := config.String(ctx, "age.ssh-key-path")
+								if sv := cmd.String("age-ssh-key-path"); sv != "" {
+									sshKeyPath = sv
+								}
+								a, err := New(ctx, loadSSHKeys, sshKeyPath)
 								if err != nil {
 									return exit.Error(exit.Unknown, err, "failed to create age backend")
 								}
-								victim := c.Args().First()
+
+								pw := cmd.String("password")
+								if pw == "" {
+									pw, err = termio.AskForPassword(ctx, "Enter password for new key", true)
+									if err != nil {
+										return err
+									}
+								}
+								rec, err := a.GenerateIdentity(ctx, "", "", pw)
+								if err != nil {
+									return exit.Error(exit.Unknown, err, "failed to generate age identity")
+								}
+
+								out.Printf(ctx, "New age identity created: %s", rec)
+								out.Notice(ctx, "New age identities are not automatically added to your recipient list, consider adding it using 'gopass recipients add age1...'")
+								out.Warning(ctx, "If you do not add this recipient to the recipient list, make sure to re-encrypt using 'gopass fsck --decrypt' to properly support this identity")
+
+								return nil
+							},
+						},
+						{
+							Name:    "remove",
+							Aliases: []string{"rm"},
+							Usage:   "Remove an identity",
+							Description: "" +
+								"Remove all identity matching the argument",
+							Action: func(ctx context.Context, cmd *cli.Command) error {
+								ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+								loadSSHKeys := config.Bool(ctx, "age.sshkeys")
+								if bv := cmd.Bool("age-sshkeys"); bv {
+									loadSSHKeys = bv
+								}
+								sshKeyPath := config.String(ctx, "age.ssh-key-path")
+								if sv := cmd.String("age-ssh-key-path"); sv != "" {
+									sshKeyPath = sv
+								}
+								a, err := New(ctx, loadSSHKeys, sshKeyPath)
+								if err != nil {
+									return exit.Error(exit.Unknown, err, "failed to create age backend")
+								}
+								victim := cmd.Args().First()
+								if len(victim) == 0 {
+									return exit.Error(exit.Usage, err, "missing argument to remove")
+								}
 
 								ids, _ := a.Identities(ctx)
 								newIds := make([]string, 0, len(ids))
 
+								debug.Log("ranging over %d age identities", len(ids))
 								for _, id := range ids {
-									// we only need to care about X25519 identities here because SSH identities are
-									// considered external and are not managed by gopass. users should use ssh-keygen
-									// and such to deal with them. At least we definitely don't want to remove them.
-									if x, ok := id.(*age.X25519Identity); ok && x.Recipient().String() == victim {
-										continue
+									// we only need to care about X25519 and plugin/wrapped identities here because
+									// SSH identities are considered external and are not managed by gopass.
+									// Users should use ssh-keygen and such to deal with them.
+									// At least we definitely don't want to remove them.
+									switch x := id.(type) {
+									case *age.X25519Identity:
+										if x.Recipient().String() == victim {
+											debug.Log("will remove X25519Identity %s", x.Recipient())
+
+											continue
+										}
+									case *wrappedIdentity:
+										skip := false
+										// to avoid fuzzy matching, let's match on entire parts
+										for part := range strings.SplitSeq(x.String(), "|") {
+											if part == victim {
+												skip = true
+											}
+										}
+										if skip {
+											debug.Log("will remove Plugin Identity %s", x)
+
+											continue
+										}
 									}
+
 									newIds = append(newIds, fmt.Sprintf("%s", id))
+								}
+								if len(newIds) != len(ids) {
+									out.Warning(ctx, "Make sure to run 'gopass fsck --decrypt' to re-encrypt your secrets without including that identity if it's not in your recipient list.")
+								} else {
+									out.Notice(ctx, "no matching identity found in list")
+								}
+
+								// we invalidate our recipient id cache when we remove an identity, if there's one
+								if err := a.recpCache.Remove(idRecpCacheKey); err != nil {
+									debug.Log("error invalidating age id recipient cache: %s", err)
 								}
 
 								return a.saveIdentities(ctx, newIds, false)
 							},
 						},
+						{
+							Name:  "sort",
+							Usage: "Configure the preferred order of age identities for decryption",
+							Description: "" +
+								"Interactively configure the order in which your age identities are tried for decryption.\n" +
+								"The order is persisted in the age.identities config option and used to deterministically\n" +
+								"sort your identities before handing them to age (see issue #3393).",
+							Action: func(ctx context.Context, cmd *cli.Command) error {
+								ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+								loadSSHKeys := config.Bool(ctx, "age.sshkeys")
+								if bv := cmd.Bool("age-sshkeys"); bv {
+									loadSSHKeys = bv
+								}
+								sshKeyPath := config.String(ctx, "age.ssh-key-path")
+								if sv := cmd.String("age-ssh-key-path"); sv != "" {
+									sshKeyPath = sv
+								}
+								a, err := New(ctx, loadSSHKeys, sshKeyPath)
+								if err != nil {
+									return exit.Error(exit.Unknown, err, "failed to create age backend")
+								}
+
+								ids, err := a.getAllIdentities(ctx)
+								if err != nil {
+									return exit.Error(exit.Unknown, err, "failed to get age identities: %s", err)
+								}
+
+								if len(ids) < 1 {
+									out.Notice(ctx, "No identities found")
+
+									return nil
+								}
+
+								// present the identities in their current effective order.
+								// Only public recipient strings are shown and stored, never
+								// secret key material.
+								ordered := orderedIdentities(ctx, ids)
+								items := make([]string, 0, len(ordered))
+								for _, id := range ordered {
+									if r := recipientOf(id); r != "" {
+										items = append(items, r)
+									} else {
+										items = append(items, fmt.Sprintf("%T", id))
+									}
+								}
+
+								sorted, res, err := termio.SortList(ctx, "Preferred order of age identities (tried top to bottom for decryption):", items)
+								if err != nil {
+									return exit.Error(exit.Unknown, err, "failed to sort identities: %s", err)
+								}
+								if res != termio.SortListSaved {
+									out.Notice(ctx, "Aborted, no changes saved")
+
+									return nil
+								}
+
+								cfg, _ := config.FromContext(ctx)
+								if err := cfg.Set("", "age.identities", strings.Join(sorted, ",")); err != nil {
+									return exit.Error(exit.Unknown, err, "failed to save config: %s", err)
+								}
+
+								out.Notice(ctx, "Saved preferred identity order to age.identities (recipients only, no secret key material)")
+
+								return nil
+							},
+						},
 					},
+				},
+				{
+					Name:        "lock",
+					Usage:       "Lock the age agent",
+					Description: "Lock the age agent, this will remove all cached identities from memory and require you to re-enter any passwords for your identities when decrypting",
+					Action:      l.lock,
+					Hidden:      true,
 				},
 			},
 		},
 	}
+}
+
+func (l loader) agent(ctx context.Context, cmd *cli.Command) error {
+	out.Printf(ctx, "Starting age agent ...")
+
+	ag, err := agent.New()
+	if err != nil {
+		return err
+	}
+
+	return ag.Run(ctx)
+}
+
+func (l loader) lock(ctx context.Context, cmd *cli.Command) error {
+	client := agent.NewClient()
+	if err := client.Lock(); err != nil {
+		return exit.Error(exit.Unknown, err, "failed to lock agent: %s", err)
+	}
+
+	return nil
 }

@@ -2,7 +2,6 @@ package action
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,47 +13,55 @@ import (
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/cui"
 	"github.com/gopasspw/gopass/internal/out"
-	"github.com/gopasspw/gopass/internal/set"
 	"github.com/gopasspw/gopass/internal/store/root"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
 	"github.com/gopasspw/gopass/pkg/debug"
 	"github.com/gopasspw/gopass/pkg/fsutil"
 	"github.com/gopasspw/gopass/pkg/termio"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // Clone will fetch and mount a new password store from a git repo.
-func (s *Action) Clone(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
-	if c.IsSet("crypto") {
-		ctx = backend.WithCryptoBackendString(ctx, c.String("crypto"))
+// It can also be used to clone a new password store to a submount.
+func (s *setupHandler) Clone(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	if cmd.IsSet("crypto") {
+		var err error
+		ctx, err = backend.WithCryptoBackendString(ctx, cmd.String("crypto"))
+		if err != nil {
+			return exit.Error(exit.Unknown, err, "Failed to set crypto backend: %s", err)
+		}
 	}
 
-	if c.IsSet("storage") {
-		ctx = backend.WithStorageBackendString(ctx, c.String("storage"))
+	if cmd.IsSet("storage") {
+		var err error
+		ctx, err = backend.WithStorageBackendString(ctx, cmd.String("storage"))
+		if err != nil {
+			return exit.Error(exit.Unknown, err, "Failed to set storage backend: %s", err)
+		}
 	}
 
-	path := c.String("path")
+	path := cmd.String("path")
 
-	if c.Args().Len() < 1 {
+	if cmd.Args().Len() < 1 {
 		return exit.Error(exit.Usage, nil, "Usage: %s clone repo [mount]", s.Name)
 	}
 
 	// gopass clone [--crypto=foo] [--path=/some/store] git://foo/bar team0.
-	repo := c.Args().Get(0)
+	repo := cmd.Args().Get(0)
 	mount := ""
-	if c.Args().Len() > 1 {
-		mount = c.Args().Get(1)
+	if cmd.Args().Len() > 1 {
+		mount = cmd.Args().Get(1)
 	}
 
 	out.Printf(ctx, logo)
 	out.Printf(ctx, "🌟 Welcome to gopass!")
 	out.Printf(ctx, "🌟 Cloning an existing password store from %q ...", repo)
 
-	if name := termio.DetectName(ctx, c); name != "" {
+	if name := termio.DetectName(ctx, cmd); name != "" {
 		ctx = ctxutil.WithUsername(ctx, name)
 	}
-	if email := termio.DetectEmail(ctx, c); email != "" {
+	if email := termio.DetectEmail(ctx, cmd); email != "" {
 		ctx = ctxutil.WithEmail(ctx, email)
 	}
 
@@ -87,11 +94,35 @@ func (s *Action) Clone(c *cli.Context) error {
 		return nil
 	}
 
-	if !c.Bool("check-keys") {
+	if !cmd.Bool("check-keys") {
 		return nil
 	}
 
-	return s.cloneCheckDecryptionKeys(ctx, mount)
+	// Unified join flow (Stage 2 / GH-2620): imports existing .public-keys/,
+	// checks decryption, and — if needed — exports the user's own key additively.
+	return s.cloneJoinTeam(ctx, mount)
+}
+
+// cloneJoinTeam performs the unified post-clone join processing: import
+// existing keys, check decryption, and if needed export the user's key
+// additively (never removing other recipients). This replaces the old
+// cloneCheckDecryptionKeys path which could regenerate a reduced key set.
+func (s *setupHandler) cloneJoinTeam(ctx context.Context, mount string) error {
+	exported, err := s.Store.JoinTeam(ctx, mount)
+	if err != nil {
+		out.Warningf(ctx, "Join team processing: %s", err)
+
+		return nil
+	}
+
+	if exported {
+		out.Noticef(ctx, "🔑 Your public key has been added to the store's .public-keys/.")
+		out.Noticef(ctx, "Request access: ask a team owner to run 'gopass recipients add <your-key>' and 'gopass sync'.")
+	} else {
+		out.OKf(ctx, "You can decrypt this store. Welcome to the team!")
+	}
+
+	return nil
 }
 
 // storageBackendOrDefault will return a storage backend that can be clone,
@@ -115,7 +146,7 @@ func storageBackendOrDefault(ctx context.Context, repo string) backend.StorageBa
 	return backend.GitFS
 }
 
-func (s *Action) clone(ctx context.Context, repo, mount, path string) error {
+func (s *setupHandler) clone(ctx context.Context, repo, mount, path string) error {
 	if path == "" {
 		path = config.PwStoreDir(mount)
 	}
@@ -126,7 +157,7 @@ func (s *Action) clone(ctx context.Context, repo, mount, path string) error {
 	}
 
 	if mount == "" && inited {
-		return exit.Error(exit.AlreadyInitialized, nil, "Can not clone %s to the root store, as this store is already initialized. Please try cloning to a submount: `%s clone %s sub`", repo, s.Name, repo)
+		return exit.Error(exit.AlreadyInitialized, nil, "Cannot clone %s to the root store, as this store is already initialized. Please try cloning to a submount: `%s clone %s sub`", repo, s.Name, repo)
 	}
 
 	// make sure the parent directory exists.
@@ -139,7 +170,8 @@ func (s *Action) clone(ctx context.Context, repo, mount, path string) error {
 	// clone repo.
 	sb := storageBackendOrDefault(ctx, repo)
 	out.Noticef(ctx, "Cloning %s repository %q to %q ...", sb, repo, path)
-	if _, err := backend.Clone(ctx, sb, repo, path); err != nil {
+	_, err = backend.Clone(ctx, sb, repo, path)
+	if err != nil {
 		return exit.Error(exit.Git, err, "failed to clone repo %q to %q: %s", repo, path, err)
 	}
 
@@ -173,63 +205,7 @@ func (s *Action) clone(ctx context.Context, repo, mount, path string) error {
 	return nil
 }
 
-func (s *Action) cloneCheckDecryptionKeys(ctx context.Context, mount string) error {
-	crypto := s.getCryptoFor(ctx, mount)
-	if crypto == nil {
-		return fmt.Errorf("can not continue without crypto")
-	}
-	debug.Log("Crypto Backend initialized as: %s", crypto.Name())
-
-	// check for existing GPG/Age keypairs (private/secret keys). We need at least
-	// one useable key pair. If none exists try to create one.
-	if !s.initHasUseablePrivateKeys(ctx, crypto) {
-		out.Printf(ctx, "🔐 No useable cryptographic keys. Generating new key pair")
-		if crypto.Name() == "gpgcli" {
-			out.Printf(ctx, "🕰 Key generation may take up to a few minutes")
-		}
-		if err := s.initGenerateIdentity(ctx, crypto, ctxutil.GetUsername(ctx), ctxutil.GetEmail(ctx)); err != nil {
-			return fmt.Errorf("failed to create new private key: %w", err)
-		}
-		out.Printf(ctx, "🔐 Cryptographic keys generated")
-	}
-
-	debug.Log("We have useable private keys")
-
-	recpSet := set.New(s.Store.ListRecipients(ctx, mount)...)
-	ids, err := crypto.ListIdentities(ctx)
-	if err != nil {
-		out.Warningf(ctx, "Failed to check decryption keys: %s", err)
-
-		return nil
-	}
-
-	idSet := set.New(ids...)
-	if idSet.IsSubset(recpSet) {
-		out.Noticef(ctx, "Found valid decryption keys. You can now decrypt your passwords.")
-
-		return nil
-	}
-
-	var exported bool
-	if sub, err := s.Store.GetSubStore(mount); err == nil {
-		debug.Log("exporting public keys: %v", idSet.Elements())
-		exported, err = sub.UpdateExportedPublicKeys(ctx, idSet.Elements())
-		if err != nil {
-			debug.Log("failed to export missing public keys: %w", err)
-		}
-	} else {
-		debug.Log("failed to get sub store: %s", err)
-	}
-
-	out.Noticef(ctx, "Please ask the owner of the password store to add one of your keys: %s", strings.Join(idSet.Elements(), ", "))
-	if exported {
-		out.Noticef(ctx, "The missing keys were exported to the password store. Run `gopass sync` to push them.")
-	}
-
-	return nil
-}
-
-func (s *Action) cloneAddMount(ctx context.Context, mount, path string) error {
+func (s *setupHandler) cloneAddMount(ctx context.Context, mount, path string) error {
 	if mount == "" {
 		return nil
 	}
@@ -251,7 +227,7 @@ func (s *Action) cloneAddMount(ctx context.Context, mount, path string) error {
 	return nil
 }
 
-func (s *Action) cloneGetGitConfig(ctx context.Context, name string) (string, string, error) {
+func (s *setupHandler) cloneGetGitConfig(ctx context.Context, name string) (string, string, error) {
 	out.Printf(ctx, "🎩 Gathering information for the git repository ...")
 	// for convenience, set defaults to user-selected values from available private keys.
 	// NB: discarding returned error since this is merely a best-effort look-up for convenience.

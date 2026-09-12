@@ -1,12 +1,9 @@
 package pwgen
 
 import (
-	"bytes"
-	"crypto/rand"
+	crand "crypto/rand"
+	"errors"
 	"fmt"
-	"io"
-	mrand "math/rand"
-	"os"
 	"strings"
 	"testing"
 
@@ -37,40 +34,28 @@ func TestPwgenCharset(t *testing.T) {
 	t.Setenv("GOPASS_CHARACTER_SET", "a")
 
 	assert.Equal(t, "aaaa", GeneratePassword(4, true))
-	assert.Equal(t, "", GeneratePasswordCharsetCheck(4, "a"))
+	assert.Empty(t, GeneratePasswordCharsetCheck(4, "a"))
 }
 
-func TestPwgenNoCrand(t *testing.T) {
-	old := rand.Reader
-	rand.Reader = strings.NewReader("")
+func TestPwgenEntropyFailurePanics(t *testing.T) {
+	oldReader := crand.Reader
+	crand.Reader = errReader{err: errors.New("entropy unavailable")}
 
 	defer func() {
-		rand.Reader = old
+		crand.Reader = oldReader
 	}()
 
-	oldOut := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-	os.Stderr = w
-	done := make(chan string)
+	require.PanicsWithError(t, "entropy unavailable", func() {
+		randomInteger(1024)
+	})
+}
 
-	go func() {
-		buf := &bytes.Buffer{}
-		_, _ = io.Copy(buf, r)
-		done <- buf.String()
-	}()
+type errReader struct {
+	err error
+}
 
-	// if we seed math/rand with 1789, the first "random number" will be 42
-	mrand.Seed(1789)
-
-	n := randomInteger(1024)
-
-	require.NoError(t, w.Close())
-
-	os.Stdout = oldOut
-
-	assert.Equal(t, 42, n)
-	assert.Equal(t, "WARNING: No crypto/rand available. Falling back to PRNG\n", <-done)
+func (r errReader) Read([]byte) (int, error) {
+	return 0, r.err
 }
 
 func TestContainsAllClasses(t *testing.T) {
@@ -111,6 +96,83 @@ func TestGeneratePasswordWithAllClasses(t *testing.T) {
 	pw, err := GeneratePasswordWithAllClasses(50, true)
 	require.NoError(t, err)
 	assert.Len(t, pw, 50)
+}
+
+func TestGeneratePasswordCharsetStrict(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		length  int
+		charset string
+		wantErr bool
+	}{
+		{
+			name:    "all character classes",
+			length:  20,
+			charset: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%&*",
+			wantErr: false,
+		},
+		{
+			name:    "only digits and lowercase",
+			length:  10,
+			charset: "abcdefghijklmnopqrstuvwxyz0123456789",
+			wantErr: false,
+		},
+		{
+			name:    "only uppercase",
+			length:  10,
+			charset: "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+			wantErr: false,
+		},
+		{
+			name:    "digits only",
+			length:  6,
+			charset: "0123456789",
+			wantErr: false,
+		},
+		{
+			name:    "symbols and digits",
+			length:  15,
+			charset: "0123456789!@#$%^&*()",
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			pw, err := GeneratePasswordCharsetStrict(tc.length, tc.charset)
+			if tc.wantErr {
+				require.Error(t, err)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Len(t, pw, tc.length)
+
+			// Verify all detected character classes are present
+			if strings.ContainsAny(tc.charset, Digits) {
+				assert.True(t, containsAllClasses(pw, Digits), "password should contain at least one digit")
+			}
+			if strings.ContainsAny(tc.charset, Upper) {
+				assert.True(t, containsAllClasses(pw, Upper), "password should contain at least one uppercase letter")
+			}
+			if strings.ContainsAny(tc.charset, Lower) {
+				assert.True(t, containsAllClasses(pw, Lower), "password should contain at least one lowercase letter")
+			}
+			if strings.ContainsAny(tc.charset, Syms) {
+				assert.True(t, containsAllClasses(pw, Syms), "password should contain at least one symbol")
+			}
+
+			// Verify all characters are from the charset
+			for _, c := range pw {
+				assert.Contains(t, tc.charset, string(c), "password should only contain characters from charset")
+			}
+		})
+	}
 }
 
 func TestGenerateMemorablePassword(t *testing.T) {

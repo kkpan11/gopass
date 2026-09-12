@@ -7,7 +7,7 @@ import (
 
 	"github.com/gopasspw/gopass/internal/store"
 	"github.com/gopasspw/gopass/pkg/debug"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 var defaultTemplates = []string{
@@ -59,6 +59,37 @@ attributes:
   - name: "comment"
     type: "string"
 `,
+	`---
+priority: 2
+name: "SSO / passwordless login (e.g. Google)"
+prefix: "websites"
+name_from:
+  - "url"
+  - "username"
+welcome: "🧪 Creating SSO / passwordless login"
+attributes:
+  - name: "url"
+    type: "hostname"
+    prompt: "Website URL"
+    min: 1
+    max: 255
+  - name: "username"
+    type: "string"
+    prompt: "Account / email"
+    min: 1
+  - name: "login-method"
+    type: "choice"
+    prompt: "Login via"
+    options:
+      - "google"
+      - "apple"
+      - "github"
+      - "microsoft"
+      - "sso"
+      - "magic-link"
+  - name: "comment"
+    type: "string"
+`,
 }
 
 type storageSetter interface {
@@ -93,7 +124,7 @@ func (w *Wizard) writeTemplates(ctx context.Context, s storageSetter) error {
 		debug.Log("wrote default template to %s", path)
 	}
 
-	if err := s.TryCommit(ctx, "Added default wizard templates"); err != nil {
+	if err := s.TryCommit(ctx, "Add default wizard templates"); err != nil {
 		return fmt.Errorf("failed to commit changes: %w", err)
 	}
 

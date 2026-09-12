@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -23,7 +24,12 @@ import (
 	_ "github.com/gopasspw/gopass/internal/backend/crypto"
 	_ "github.com/gopasspw/gopass/internal/backend/storage"
 	"github.com/gopasspw/gopass/internal/config"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
+)
+
+var (
+	filename           = "VERSION"
+	stdout   io.Writer = os.Stdout
 )
 
 func main() {
@@ -48,7 +54,7 @@ func main() {
 		return
 	}
 
-	vs, err := os.ReadFile("VERSION")
+	vs, err := os.ReadFile(filename)
 	if err != nil {
 		panic(err)
 	}
@@ -74,7 +80,7 @@ func main() {
 	funcMap := template.FuncMap{
 		"flags": getFlags,
 	}
-	if err := template.Must(template.New("man").Funcs(funcMap).Parse(manTpl)).Execute(os.Stdout, data); err != nil {
+	if err := template.Must(template.New("man").Funcs(funcMap).Parse(manTpl)).Execute(stdout, data); err != nil {
 		panic(err)
 	}
 }

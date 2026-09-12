@@ -16,14 +16,14 @@ func TestFind(t *testing.T) {
 
 	out, err := ts.run("find")
 	require.Error(t, err)
-	assert.Equal(t, "\nError: Usage: "+filepath.Base(ts.Binary)+" find <pattern>\n", out)
+	assert.Equal(t, "Usage: "+filepath.Base(ts.Binary)+" find <pattern>\n", out)
 
 	_, err = ts.run("config show.safecontent false")
 	require.NoError(t, err)
 
 	out, err = ts.run("find bar")
 	require.Error(t, err)
-	assert.Equal(t, "\nError: no results found\n", out)
+	assert.Equal(t, "no results found\n", out)
 
 	_, err = ts.runCmd([]string{ts.Binary, "insert", "foo/bar"}, []byte("baz"))
 	require.NoError(t, err)
@@ -47,7 +47,7 @@ func TestFind(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "foo/bar")
 
-	out, err = ts.run("find -f bar")
+	out, err = ts.run("find -u bar")
 	require.NoError(t, err)
 	assert.Contains(t, out, "foo/bar")
 }

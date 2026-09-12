@@ -6,6 +6,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/fatih/color"
 	"github.com/gopasspw/gopass/internal/backend"
 	_ "github.com/gopasspw/gopass/internal/backend/crypto"
 	_ "github.com/gopasspw/gopass/internal/backend/storage"
@@ -27,6 +28,26 @@ func TestSimpleList(t *testing.T) {
 	st, err := rs.Tree(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"foo"}, st.List(tree.INF))
+}
+
+func TestTreeMarksLinkedSecrets(t *testing.T) {
+	ctx := config.NewContextInMemory()
+
+	u := gptest.NewUnitTester(t)
+
+	rs, err := createRootStore(ctx, u)
+	require.NoError(t, err)
+	require.NoError(t, rs.Link(ctx, "foo", "bar"))
+
+	st, err := rs.Tree(ctx)
+	require.NoError(t, err)
+
+	color.NoColor = true
+	assert.Equal(t, `gopass
+├── bar -> foo
+└── foo
+`, st.Format(tree.INF))
+	assert.Equal(t, []string{"bar", "foo"}, st.List(tree.INF))
 }
 
 func TestListMulti(t *testing.T) {
@@ -122,12 +143,15 @@ func TestListNested(t *testing.T) {
 
 	assert.False(t, rs.Exists(ctx, "sub1"))
 	assert.True(t, rs.IsDir(ctx, "sub1"))
-	assert.Equal(t, "", rs.Alias())
+	assert.Empty(t, rs.Alias())
 	assert.NotNil(t, rs.Storage(ctx, "sub1"))
 }
 
 func createRootStore(ctx context.Context, u *gptest.Unit) (*Store, error) {
-	ctx = backend.WithCryptoBackendString(ctx, "plain")
+	ctx, err := backend.WithCryptoBackendString(ctx, "plain")
+	if err != nil {
+		return nil, err
+	}
 	cfg := config.NewInMemory()
 	if err := cfg.SetPath(u.StoreDir("")); err != nil {
 		return nil, err

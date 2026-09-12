@@ -10,7 +10,6 @@ import (
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/out"
 	"github.com/gopasspw/gopass/pkg/ctxutil"
-	"github.com/gopasspw/gopass/pkg/termio"
 	"github.com/gopasspw/gopass/tests/gptest"
 	"github.com/stretchr/testify/require"
 )
@@ -18,10 +17,11 @@ import (
 func TestHistory(t *testing.T) {
 	u := gptest.NewUnitTester(t)
 
-	r1 := gptest.UnsetVars(termio.NameVars...)
-	r2 := gptest.UnsetVars(termio.EmailVars...)
-	defer r1()
-	defer r2()
+	for _, k := range []string{"DEBFULLNAME", "DEBEMAIL", "USER", "EMAIL"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("GIT_AUTHOR_NAME", "foo bar")
+	t.Setenv("GIT_AUTHOR_EMAIL", "foo.bar@example.org")
 
 	ctx := config.NewContextInMemory()
 	ctx = ctxutil.WithAlwaysYes(ctx, true)
@@ -39,7 +39,9 @@ func TestHistory(t *testing.T) {
 	ctx = act.cfg.WithConfig(ctx)
 
 	t.Run("can initialize", func(t *testing.T) {
-		require.NoError(t, act.IsInitialized(gptest.CliCtx(ctx, t)))
+		_, errIsInit := act.IsInitialized(ctx, gptest.CliCtx(ctx, t))
+
+		require.NoError(t, errIsInit)
 	})
 
 	buf := &bytes.Buffer{}
@@ -56,16 +58,16 @@ func TestHistory(t *testing.T) {
 
 	t.Run("insert bar", func(t *testing.T) {
 		defer buf.Reset()
-		require.NoError(t, act.Insert(gptest.CliCtx(ctx, t, "bar")))
+		require.NoError(t, act.Insert(ctx, gptest.CliCtx(ctx, t, "bar")))
 	})
 
 	t.Run("history bar", func(t *testing.T) {
 		defer buf.Reset()
-		require.NoError(t, act.History(gptest.CliCtx(ctx, t, "bar")))
+		require.NoError(t, act.History(ctx, gptest.CliCtx(ctx, t, "bar")))
 	})
 
 	t.Run("history --password bar", func(t *testing.T) {
 		defer buf.Reset()
-		require.NoError(t, act.History(gptest.CliCtxWithFlags(ctx, t, map[string]string{"password": "true"}, "bar")))
+		require.NoError(t, act.History(ctx, gptest.CliCtxWithFlags(ctx, t, map[string]string{"password": "true"}, "bar")))
 	})
 }

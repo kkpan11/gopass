@@ -27,7 +27,7 @@ password: bar
 
 	v, found := s.Get("Test / test.com")
 	assert.False(t, found)
-	assert.Equal(t, "", v)
+	assert.Empty(t, v)
 
 	t.Logf("Secret:\n%+v\n%s\n", s, string(s.Bytes()))
 
@@ -56,7 +56,7 @@ password: bar
 		s.Del("username")
 		v, ok := s.Get("username")
 		assert.False(t, ok)
-		assert.Equal(t, "", v)
+		assert.Empty(t, v)
 
 		assert.Equal(t, `somepasswd
 Test / test.com
@@ -119,6 +119,75 @@ func TestSetKeyValuePairToEmptyAKV(t *testing.T) {
 	v, found := sec.Get("foo")
 	assert.True(t, found)
 	assert.Equal(t, "bar", v)
+}
+
+func TestAKVTrailingWhitespace(t *testing.T) {
+	t.Parallel()
+	// Expected behaviour is KEY: VALUE, with one space.
+	// Fallback should exist for KEY:VALUE, with no spaces.
+	mlValue := `foobar
+defaultBehaviour: cd
+sorroundedBySpace:   cd 	 
+withoutSpace:cd`
+	s := ParseAKV([]byte(mlValue))
+	assert.NotNil(t, s)
+	v1, _ := s.Get("defaultBehaviour")
+	assert.Equal(t, "cd", v1)
+	v2, _ := s.Get("sorroundedBySpace")
+	assert.Equal(t, "  cd \t ", v2)
+	v3, _ := s.Get("defaultBehaviour")
+	assert.Equal(t, "cd", v3)
+}
+
+func TestAKVPasswordWhitespace(t *testing.T) {
+	t.Parallel()
+
+	helloIsWorldStr := "\nhello: world\n"
+	helloIsWorldPair := map[string][]string{
+		"hello": {"world"},
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   string
+		pw   string
+		kvp  map[string][]string
+	}{
+		{
+			name: "justpassword",
+			in:   `this is a password.` + helloIsWorldStr,
+			pw:   "this is a password.",
+			kvp:  helloIsWorldPair,
+		},
+		{
+			name: "spaceonly",
+			in:   "   " + helloIsWorldStr,
+			pw:   "   ",
+			kvp:  helloIsWorldPair,
+		},
+		{
+			name: "tab",
+			in:   "\t tab padded password \t" + helloIsWorldStr,
+			pw:   "\t tab padded password \t",
+			kvp:  helloIsWorldPair,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			a := ParseAKV([]byte(tc.in))
+
+			assert.Equal(t, tc.pw, a.password, tc.name)
+			for k, vs := range tc.kvp {
+				sort.Strings(vs)
+				gvs := a.kvp[k]
+				sort.Strings(gvs)
+				assert.Equal(t, vs, gvs, k)
+			}
+
+			assert.Equal(t, tc.in, string(a.Bytes()), tc.name)
+		})
+	}
 }
 
 func TestParseAKV(t *testing.T) {

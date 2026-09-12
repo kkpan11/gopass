@@ -1,3 +1,5 @@
+// Package recipients provides a datastruct for managing for managinig recipients.
+// It also provides methods for marshalling and unmarshalling the recipients.
 package recipients
 
 import (
@@ -5,11 +7,9 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"sort"
 	"strings"
 
-	"github.com/gopasspw/gopass/internal/set"
-	"golang.org/x/exp/maps"
+	"github.com/gopasspw/gopass/pkg/set"
 )
 
 // Recipients is a list of Key IDs. It will try to retain the file as much as possible while manipulating the recipients.
@@ -37,10 +37,7 @@ func (r *Recipients) Len() int {
 
 // IDs returns the key IDs.
 func (r *Recipients) IDs() []string {
-	res := maps.Keys(r.r)
-	sort.Strings(res)
-
-	return res
+	return set.SortedKeys(r.r)
 }
 
 // Add adds a new recipients. It returns true if the recipient was added.
@@ -99,8 +96,8 @@ func (r *Recipients) Marshal() []byte {
 
 		key := line
 		// trim any trailing comments
-		if idx := strings.Index(line, "#"); idx != -1 {
-			key = strings.TrimSpace(line[:idx])
+		if before, _, ok := strings.Cut(line, "#"); ok {
+			key = strings.TrimSpace(before)
 		}
 
 		// skip deleted IDs
@@ -159,8 +156,8 @@ func Unmarshal(buf []byte) *Recipients {
 
 		// trim trailing comments
 		key := line
-		if idx := strings.Index(line, "#"); idx != -1 {
-			key = strings.TrimSpace(line[:idx])
+		if before, _, ok := strings.Cut(line, "#"); ok {
+			key = strings.TrimSpace(before)
 		}
 
 		if len(key) < 1 {

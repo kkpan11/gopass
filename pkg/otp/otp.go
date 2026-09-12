@@ -1,3 +1,5 @@
+// Package otp provides functions to handle OTP secrets.
+// It can parse OTP secrets from various formats and generate QR codes for them.
 package otp
 
 import (
@@ -13,7 +15,9 @@ import (
 	"github.com/pquerna/otp"
 )
 
-// Calculate will compute a OTP code from a given secret.
+// Calculate will compute an OTP code from a given secret.
+// It will look for a field named "otpauth" or "totp" or "hotp".
+// If none is found it will fall back to the password.
 //
 //nolint:ireturn
 func Calculate(name string, sec gopass.Secret) (*otp.Key, error) {
@@ -53,7 +57,7 @@ func getOTPURL(sec gopass.Secret) string {
 	}
 
 	// if there is no KV entry check the body
-	for _, line := range strings.Split(sec.Body(), "\n") {
+	for line := range strings.SplitSeq(sec.Body(), "\n") {
 		if strings.HasPrefix(line, "otpauth://") {
 			return line
 		}
@@ -87,7 +91,7 @@ func parseOTP(typ string, secKey string) (*otp.Key, error) {
 	return key, nil
 }
 
-// WriteQRFile writes the given OTP code as a QR image to disk.
+// WriteQRFile writes the given OTP key as a QR image to disk.
 func WriteQRFile(key *otp.Key, file string) error {
 	// Convert TOTP key into a QR code encoded as a PNG image.
 	var buf bytes.Buffer

@@ -1,7 +1,10 @@
+// Package secparse provides functions to parse secrets from various formats.
+// It can parse secrets from legacy MIME format, YAML format, and AKV format.
 package secparse
 
 import (
 	"errors"
+	"testing"
 
 	"github.com/gopasspw/gopass/internal/out"
 	"github.com/gopasspw/gopass/pkg/debug"
@@ -9,8 +12,11 @@ import (
 	"github.com/gopasspw/gopass/pkg/gopass/secrets"
 )
 
-// Parse tries to parse a secret. It will start with the most specific
-// secrets type.
+// Parse tries to parse a secret from a byte slice. It attempts to parse the
+// secret in the following order: legacy MIME, YAML, and finally AKV.
+// If parsing as legacy MIME or YAML fails, it falls back to the next format.
+// If a permanent error is encountered while parsing as legacy MIME, it returns
+// the error immediately.
 //
 //nolint:ireturn
 func Parse(in []byte) (gopass.Secret, error) {
@@ -47,11 +53,14 @@ func Parse(in []byte) (gopass.Secret, error) {
 	return s, nil
 }
 
-// MustParse parses a secret or panics. Should only be used for tests.
-func MustParse(in string) gopass.Secret {
+// MustParse parses a secret from a string and calls tb.Fatal if an error occurs.
+// This function must only be used in tests.
+func MustParse(tb testing.TB, in string) gopass.Secret {
+	tb.Helper()
+
 	sec, err := Parse([]byte(in))
 	if err != nil {
-		panic(err)
+		tb.Fatalf("secparse.MustParse: %v", err)
 	}
 
 	return sec

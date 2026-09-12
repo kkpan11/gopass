@@ -3,6 +3,7 @@ package action
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
@@ -17,7 +18,7 @@ import (
 	"github.com/gopasspw/gopass/tests/gptest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 func TestFind(t *testing.T) {
@@ -49,38 +50,37 @@ func TestFind(t *testing.T) {
 
 	// find
 	c := gptest.CliCtx(ctx, t)
-	if err := act.FindFuzzy(c); err == nil || err.Error() != fmt.Sprintf("Usage: %s find <pattern>", actName) {
+	if err := act.FindFuzzy(ctx, c); err == nil || err.Error() != fmt.Sprintf("Usage: %s find <pattern>", actName) {
 		t.Errorf("Should fail: %s", err)
 	}
 
 	// find fo (with fuzzy search)
 	c = gptest.CliCtxWithFlags(ctx, t, nil, "fo")
-	require.NoError(t, act.FindFuzzy(c))
+	require.NoError(t, act.FindFuzzy(ctx, c))
 	assert.Contains(t, strings.TrimSpace(buf.String()), "Found exact match in \"foo\"\nsecret")
 	buf.Reset()
 
 	// find fo (no fuzzy search)
 	c = gptest.CliCtxWithFlags(ctx, t, nil, "fo")
-	require.NoError(t, act.Find(c))
+	require.NoError(t, act.Find(ctx, c))
 	assert.Equal(t, "foo", strings.TrimSpace(buf.String()))
 	buf.Reset()
 
 	// testing the safecontent case
 	require.NoError(t, act.cfg.Set("", "show.safecontent", "true"))
-	c.Context = ctx
-	require.NoError(t, act.FindFuzzy(c))
+	require.NoError(t, act.FindFuzzy(ctx, c))
 	buf.Reset()
 
 	// testing with the clip flag set
 	c = gptest.CliCtxWithFlags(ctx, t, map[string]string{"clip": "true"}, "fo")
-	require.NoError(t, act.FindFuzzy(c))
+	require.NoError(t, act.FindFuzzy(ctx, c))
 	out := strings.TrimSpace(buf.String())
 	assert.Contains(t, out, "Found exact match in \"foo\"")
 	buf.Reset()
 
 	// safecontent case with force flag set
 	c = gptest.CliCtxWithFlags(ctx, t, map[string]string{"unsafe": "true"}, "fo")
-	require.NoError(t, act.FindFuzzy(c))
+	require.NoError(t, act.FindFuzzy(ctx, c))
 	out = strings.TrimSpace(buf.String())
 	assert.Contains(t, out, "Found exact match in \"foo\"\nsecret")
 	buf.Reset()
@@ -90,7 +90,7 @@ func TestFind(t *testing.T) {
 
 	// find yo
 	c = gptest.CliCtx(ctx, t, "yo")
-	require.Error(t, act.FindFuzzy(c))
+	require.Error(t, act.FindFuzzy(ctx, c))
 	buf.Reset()
 
 	// add some secrets
@@ -104,7 +104,7 @@ func TestFind(t *testing.T) {
 
 	// find bar
 	c = gptest.CliCtx(ctx, t, "bar")
-	require.NoError(t, act.FindFuzzy(c))
+	require.NoError(t, act.FindFuzzy(ctx, c))
 	assert.Equal(t, "bar/baz\nbar/zab", strings.TrimSpace(buf.String()))
 	buf.Reset()
 
@@ -120,5 +120,36 @@ func TestFind(t *testing.T) {
 
 	// findSelection w/o options
 	c = gptest.CliCtx(ctx, t)
-	require.Error(t, act.findSelection(ctx, c, nil, "fo", func(_ context.Context, _ *cli.Context, _ string, _ bool) error { return nil }))
+	require.Error(t, act.findSelection(ctx, c, nil, "fo", func(_ context.Context, _ *cli.Command, _ string, _ bool) error { return nil }))
+
+	// Test regex matching
+	// Add a secret with a pattern that can be matched by a regex
+	require.NoError(t, act.Store.Set(ctx, "test/regex123", sec))
+	require.NoError(t, act.Store.Set(ctx, "test/no-match", sec))
+	buf.Reset()
+
+	// find using regex pattern
+	c = gptest.CliCtxWithFlags(ctx, t, map[string]string{"regex": "true"}, "regex.*")
+	require.NoError(t, act.Find(ctx, c))
+	assert.Equal(t, "test/regex123", strings.TrimSpace(buf.String()))
+	buf.Reset()
+
+	// find using regex pattern with no match
+	c = gptest.CliCtxWithFlags(ctx, t, map[string]string{"regex": "true"}, "nomatch.*")
+	require.Error(t, act.Find(ctx, c))
+	buf.Reset()
+
+	// find --json with multiple matches
+	c = gptest.CliCtxWithFlags(ctx, t, map[string]string{"json": "true"}, "bar")
+	require.NoError(t, act.Find(ctx, c))
+	var jsonOut []string
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &jsonOut))
+	assert.Contains(t, jsonOut, "bar/baz")
+	assert.Contains(t, jsonOut, "bar/zab")
+	buf.Reset()
+
+	// find --json with no match returns error
+	c = gptest.CliCtxWithFlags(ctx, t, map[string]string{"json": "true"}, "zzznomatch")
+	require.Error(t, act.Find(ctx, c))
+	buf.Reset()
 }

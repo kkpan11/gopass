@@ -1,6 +1,6 @@
-FROM golang:1.22-alpine@sha256:0d3653dd6f35159ec6e3d10263a42372f6f194c3dea0b35235d72aabde86486e AS build-env
+FROM docker.io/library/golang:1.27-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS build-env
 
-ENV CGO_ENABLED 0
+ENV CGO_ENABLED=0
 
 RUN apk add --no-cache make git ncurses
 
@@ -13,7 +13,7 @@ RUN go mod download
 
 COPY . .
 
-ARG golags_arg=""
+ARG goflags_arg=""
 ENV GOFLAGS=$goflags_arg
 
 RUN make clean
@@ -59,7 +59,7 @@ RUN go mod download
 RUN make clean
 RUN make git-credential-gopass
 
-FROM alpine@sha256:c5b1261d6d3e43071626931fc004f70149baeba2c8ec672bd4f27761f8e1ad6b
+FROM docker.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 RUN apk add --no-cache ca-certificates git gnupg
 COPY --from=build-env /home/runner/work/gopass/gopass/gopass /usr/local/bin/
 COPY --from=build-env /home/runner/work/gopass/gopass-jsonapi/gopass-jsonapi /usr/local/bin/

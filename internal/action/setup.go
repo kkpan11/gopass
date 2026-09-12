@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/fatih/color"
 	"github.com/gopasspw/gopass/internal/action/exit"
@@ -19,27 +20,36 @@ import (
 	"github.com/gopasspw/gopass/pkg/fsutil"
 	"github.com/gopasspw/gopass/pkg/pwgen/xkcdgen"
 	"github.com/gopasspw/gopass/pkg/termio"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // Setup will invoke the onboarding / setup wizard.
-func (s *Action) Setup(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
-	remote := c.String("remote")
-	team := c.String("alias")
-	create := c.Bool("create")
+func (s *setupHandler) Setup(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	remote := cmd.String("remote")
+	team := cmd.String("team")
+	create := cmd.Bool("create-team")
 
-	ctx = initParseContext(ctx, c)
+	ctx, err := initParseContext(ctx, cmd)
+	if err != nil {
+		return err
+	}
 
 	out.Printf(ctx, logo)
 	out.Printf(ctx, "🌟 Welcome to gopass!")
 	out.Printf(ctx, "🌟 Initializing a new password store ...")
+	if backend.HasCryptoBackend(ctx) {
+		out.Printf(ctx, "🔐 Using crypto backend: %s", backend.GetCryptoBackend(ctx))
+	}
+	if backend.HasStorageBackend(ctx) {
+		out.Printf(ctx, "💾 Using storage backend: %s", backend.GetStorageBackend(ctx))
+	}
 
-	if name := termio.DetectName(ctx, c); name != "" {
+	if name := termio.DetectName(ctx, cmd); name != "" {
 		ctx = ctxutil.WithUsername(ctx, name)
 	}
 
-	if email := termio.DetectEmail(ctx, c); email != "" {
+	if email := termio.DetectEmail(ctx, cmd); email != "" {
 		ctx = ctxutil.WithEmail(ctx, email)
 	}
 
@@ -80,32 +90,40 @@ func (s *Action) Setup(c *cli.Context) error {
 		return fmt.Errorf("failed to check private keys: %w", err)
 	}
 
-	// if a git remote and a team name are given attempt unattended team setup.
-	if remote != "" && team != "" {
-		if create {
-			return s.initCreateTeam(ctx, team, remote)
+	switch {
+	case create:
+		// interactive runs fall through to initCreateTeam, which prompts for
+		// a missing team name; non-interactive/unattended runs must fail fast.
+		if team == "" && (!ctxutil.IsInteractive(ctx) || ctxutil.IsAlwaysYes(ctx)) {
+			return fmt.Errorf("can not create a team without a team name; use --team to provide one, or run interactively to be prompted")
 		}
 
+		return s.initCreateTeam(ctx, team, remote)
+	case remote != "" && team != "":
+		// a git remote and a team name are given, attempt unattended team join.
 		return s.initJoinTeam(ctx, team, remote)
+	case remote != "" && team == "":
+		// only a git remote is given, clone it and exit.
+		if err := s.clone(ctx, remote, "", ""); err != nil {
+			return fmt.Errorf("failed to clone remote %q: %w", remote, err)
+		}
+
+		return nil
+	default:
+		// assume local setup by default, remotes can be added easily later.
+		if err := s.initLocal(ctx, remote); err != nil {
+			debug.Log("Setup failed. initLocal error: %s", err)
+
+			return err
+		}
+
+		debug.Log("Setup finished. All systems go. 🚀")
+
+		return nil
 	}
-
-	if team == "" && create {
-		return fmt.Errorf("can not create a team without a team name")
-	}
-
-	// assume local setup by default, remotes can be added easily later.
-	if err := s.initLocal(ctx, remote); err != nil {
-		debug.Log("Setup failed. initLocal error: %s", err)
-
-		return err
-	}
-
-	debug.Log("Setup finished. All systems go. 🚀")
-
-	return nil
 }
 
-func (s *Action) initCheckPrivateKeys(ctx context.Context, crypto backend.Crypto) error {
+func (s *setupHandler) initCheckPrivateKeys(ctx context.Context, crypto backend.Crypto) error {
 	// check for existing GPG/Age keypairs (private/secret keys). We need at least
 	// one useable key pair. If none exists try to create one.
 	if !s.initHasUseablePrivateKeys(ctx, crypto) {
@@ -119,12 +137,12 @@ func (s *Action) initCheckPrivateKeys(ctx context.Context, crypto backend.Crypto
 		out.Printf(ctx, "🔐 Cryptographic keys generated")
 	}
 
-	debug.Log("We have useable private keys")
+	debug.V(1).Log("We have useable private keys")
 
 	return nil
 }
 
-func (s *Action) initGenerateIdentity(ctx context.Context, crypto backend.Crypto, name, email string) error {
+func (s *setupHandler) initGenerateIdentity(ctx context.Context, crypto backend.Crypto, name, email string) error {
 	out.Printf(ctx, "🧪 Creating cryptographic key pair (%s) ...", crypto.Name())
 
 	if crypto.Name() == gpgcli.Name {
@@ -140,30 +158,31 @@ func (s *Action) initGenerateIdentity(ctx context.Context, crypto backend.Crypto
 		if err != nil {
 			return err
 		}
+		if strings.TrimSpace(email) == "" {
+			return fmt.Errorf("⛔️ Please enter a valid email address to proceed")
+		}
 	}
 
 	passphrase := xkcdgen.Random()
 	pwGenerated := true
-	want, err := termio.AskForBool(ctx, "⚠ Do you want to enter a passphrase? (otherwise we generate one for you)", false)
-	if err != nil {
-		return err
-	}
-	if want {
+	// support fully automated setup (e.g. for tests or CI via GOPASS_AGE_PASSWORD)
+	//nolint:nestif
+	if ap := ctxutil.GetAgePassphrase(ctx); ap != "" {
+		passphrase = ap
 		pwGenerated = false
-		sv, err := termio.AskForPassword(ctx, "passphrase for your new keypair", true)
+	} else {
+		want, err := termio.AskForBool(ctx, "⚠ Do you want to enter a passphrase? (otherwise we generate one for you)", false)
 		if err != nil {
-			return fmt.Errorf("failed to read passphrase: %w", err)
+			return err
 		}
-		passphrase = sv
-	}
-
-	// support fully automated setup (e.g. for tests)
-	if !ctxutil.IsInteractive(ctx) && ctxutil.HasPasswordCallback(ctx) {
-		pw, err := ctxutil.GetPasswordCallback(ctx)("", true)
-		if err == nil {
-			passphrase = string(pw)
+		if want {
+			pwGenerated = false
+			sv, err := termio.AskForPassword(ctx, "passphrase for your new keypair", true)
+			if err != nil {
+				return fmt.Errorf("failed to read passphrase: %w", err)
+			}
+			passphrase = sv
 		}
-		pwGenerated = false
 	}
 
 	if crypto.Name() == "gpgcli" {
@@ -176,16 +195,21 @@ func (s *Action) initGenerateIdentity(ctx context.Context, crypto backend.Crypto
 		}
 	}
 
-	if err := crypto.GenerateIdentity(ctx, name, email, passphrase); err != nil {
+	if pwGenerated {
+		out.Printf(ctx, color.MagentaString("Passphrase: ")+passphrase)
+		out.Noticef(ctx, "You need to remember this very well!")
+
+		// Prompt to confirm that the user noted their passphrase
+		if want, err := termio.AskForBool(ctx, "Did you save your passphrase?", true); err != nil || !want {
+			return fmt.Errorf("user did not confirm saving the passphrase: %w", err)
+		}
+	}
+
+	if _, err := crypto.GenerateIdentity(ctx, name, email, passphrase); err != nil {
 		return fmt.Errorf("failed to create new private key: %w", err)
 	}
 
 	out.OKf(ctx, "Key pair for %s generated", crypto.Name())
-
-	if pwGenerated {
-		out.Printf(ctx, color.MagentaString("Passphrase: ")+passphrase)
-		out.Noticef(ctx, "You need to remember this very well!")
-	}
 
 	out.Notice(ctx, "🔐 We need to unlock your newly created private key now! Please enter the passphrase you just generated.")
 
@@ -216,7 +240,7 @@ type keyExporter interface {
 	ExportPublicKey(ctx context.Context, id string) ([]byte, error)
 }
 
-func (s *Action) initExportPublicKey(ctx context.Context, crypto backend.Crypto, key string) error {
+func (s *setupHandler) initExportPublicKey(ctx context.Context, crypto backend.Crypto, key string) error {
 	exp, ok := crypto.(keyExporter)
 	if !ok {
 		debug.Log("crypto backend %T can not export public keys", crypto)
@@ -249,7 +273,7 @@ func (s *Action) initExportPublicKey(ctx context.Context, crypto backend.Crypto,
 	return nil
 }
 
-func (s *Action) initHasUseablePrivateKeys(ctx context.Context, crypto backend.Crypto) bool {
+func (s *setupHandler) initHasUseablePrivateKeys(ctx context.Context, crypto backend.Crypto) bool {
 	debug.Log("checking for existing, usable identities / private keys for %s", crypto.Name())
 	kl, err := crypto.ListIdentities(ctx)
 	if err != nil {
@@ -261,7 +285,7 @@ func (s *Action) initHasUseablePrivateKeys(ctx context.Context, crypto backend.C
 	return len(kl) > 0
 }
 
-func (s *Action) initSetupGitRemote(ctx context.Context, team, remote string) error {
+func (s *setupHandler) initSetupGitRemote(ctx context.Context, team, remote string) error {
 	var err error
 	remote, err = termio.AskForString(ctx, "Please enter the git remote for your shared store", remote)
 	if err != nil {
@@ -286,13 +310,16 @@ func (s *Action) initSetupGitRemote(ctx context.Context, team, remote string) er
 
 // initLocal will initialize a local store, useful for local-only setups or as
 // part of team setups to create the root store.
-func (s *Action) initLocal(ctx context.Context, remote string) error {
+func (s *setupHandler) initLocal(ctx context.Context, remote string) error {
 	path := ""
 	if s.Store != nil {
 		path = s.Store.Path()
 	}
 
 	out.Printf(ctx, "🌟 Configuring your password store ...")
+	if remote != "" {
+		ctx = ctxutil.WithSetupRemote(ctx, remote)
+	}
 	if err := s.init(ctxutil.WithHidden(ctx, true), "", path); err != nil {
 		return fmt.Errorf("failed to init local store: %w", err)
 	}
@@ -318,8 +345,8 @@ func (s *Action) initLocal(ctx context.Context, remote string) error {
 	return nil
 }
 
-func (s *Action) initDetectPassage(ctx context.Context) error {
-	pIds := age.PassageIdFile()
+func (s *setupHandler) initDetectPassage(ctx context.Context) error {
+	pIds := age.PassageIDFile()
 	if !fsutil.IsFile(pIds) {
 		debug.Log("no passage identities found at %s", pIds)
 
@@ -338,7 +365,7 @@ func (s *Action) initDetectPassage(ctx context.Context) error {
 }
 
 // initCreateTeam will create a local root store and a shared team store.
-func (s *Action) initCreateTeam(ctx context.Context, team, remote string) error {
+func (s *setupHandler) initCreateTeam(ctx context.Context, team, remote string) error {
 	var err error
 
 	out.Printf(ctx, "Creating a new team ...")
@@ -370,7 +397,7 @@ func (s *Action) initCreateTeam(ctx context.Context, team, remote string) error 
 
 // initJoinTeam will create a local root store and clone an existing store to
 // a mount.
-func (s *Action) initJoinTeam(ctx context.Context, team, remote string) error {
+func (s *setupHandler) initJoinTeam(ctx context.Context, team, remote string) error {
 	var err error
 
 	out.Printf(ctx, "Joining existing team ...")

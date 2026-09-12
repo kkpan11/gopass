@@ -38,7 +38,7 @@ yum install gnupg2 git rng-tools
 pacman -S gnupg2 git rng-tools
 ```
 
-#### MacOS
+#### macOS
 
 If you haven't already, install [homebrew](http://brew.sh). And then:
 
@@ -128,7 +128,7 @@ Now, you have created a public and private key pair. If you don't know what that
 
 Depending on your operating system, you can either use a package manager, download a pre-built binary, or install from source. If you have a working Go development environment, we recommend building from source.
 
-### MacOS
+### macOS
 
 If you haven't already, install [homebrew](http://brew.sh). And then:
 
@@ -147,7 +147,7 @@ echo "pinentry-program ${PINENTRY}" >>~/.gnupg/gpg-agent.conf
 defaults write org.gpgtools.common UseKeychain NO
 ```
 
-The last step is important if you want to stop `pinentry-mac` from caching your passphrase in the MacOS Keychain by default (indefinitely).
+The last step is important if you want to stop `pinentry-mac` from caching your passphrase in the macOS Keychain by default (indefinitely).
 
 ### Ubuntu, Debian, Deepin, Devuan, Kali Linux, Pardus, Parrot, Raspbian
 
@@ -273,29 +273,33 @@ go install github.com/gopasspw/gopass@latest
 Various editors may store temporary files outside of the secure working directory when editing secrets.
 We advise you to check and disable this behavior for your editor of choice.
 
-Here are a few useuful example settings:
+Here are a few useful example settings:
 
 ```vim
 " neovim on Linux
 autocmd BufNewFile,BufRead /dev/shm/gopass* setlocal noswapfile nobackup noundofile shada=""
-" neovim on MacOS
+" neovim on macOS
 autocmd BufNewFile,BufRead /private/**/gopass** setlocal noswapfile nobackup noundofile shada=""
 " vim on Linux
 autocmd BufNewFile,BufRead /dev/shm/gopass* setlocal noswapfile nobackup noundofile viminfo=""
-" vim on MacOS
+" vim on macOS
 autocmd BufNewFile,BufRead /private/**/gopass** setlocal noswapfile nobackup noundofile viminfo=""
 ```
 
-Note: gopass will attempt to detect the correct hardning flags to be used for the editor. It will pass them on
+Note: gopass will attempt to detect the correct hardening flags to be used for the editor. It will pass them on
 invocation.
 
 ### Migrating from pass to gopass
 
-If you are migrating from pass to gopass, you can simply use your existing password store and everything should just work. Furthermore, it may be helpful to link the gopass binary so that you can use it as a drop-in replacement. For example, assuming `$HOME/bin/` exists and is present in your `$PATH`:
+gopass is compatible with pass and can be used as a drop-in replacement. If you are migrating from pass to gopass, you can simply use your existing password store and everything should just work.
+
+You can even alias `pass` to `gopass` to start using it right away. For example, assuming `$HOME/bin/` exists and is present in your `$PATH`:
 
 ```bash
-ln -s $GOPATH/bin/gopass $HOME/bin/pass
+ln -s $(which gopass) $HOME/bin/pass
 ```
+
+While gopass maintains compatibility with pass, it also introduces new features such as mounts for managing multiple stores and structured secrets using YAML. On the other hand, pass has a more extensive plugin system. You can choose the tool that best fits your workflow, or even use both in parallel.
 
 ### Migrating to gopass from Other Password Stores
 
@@ -315,7 +319,7 @@ grep -q "source <(gopass completion bash)" ~/.bashrc || echo "source <(gopass co
 ```
 
 
-**MacOS**: The version of bash shipped with MacOS may [require a workaround](https://stackoverflow.com/questions/32596123/why-source-command-doesnt-work-with-process-substitution-in-bash-3-2) to enable auto completion. If the instructions above do not work try the following one:
+**macOS**: The version of bash shipped with macOS may [require a workaround](https://stackoverflow.com/questions/32596123/why-source-command-doesnt-work-with-process-substitution-in-bash-3-2) to enable auto completion. If the instructions above do not work try the following:
 
 ```bash
 source /dev/stdin <<<"$(gopass completion bash)"
@@ -336,11 +340,9 @@ rm -i ${ZDOTDIR:-${HOME:?No ZDOTDIR or HOME}}/.zcompdump && compinit
 
 Then exit and re-run zsh if the last command failed.
 
-Notice that it is important to directly redirect Gopass' output to a file,
-using pipes or echo mess up the output. Also notice that the generated `_gopass` file is
-a completion file that is supposed to be handled by zsh and to be installed in the zsh
+Notice that it is important to directly redirect gopass' output to a file. Using pipes or `echo` messes up the output. This produces a completion file that is supposed to be handled by zsh and to be installed in the zsh
 completions directory, as defined by either the standard `/usr/share/zsh/site-functions/` path,
-or by a user-specified `fpath` folder. It is not meant to used with `source`.
+or by a user-specified `fpath` folder. It is not meant to be used with `source`.
 
 If zsh completion is still not working, you might want to add the following to your `.zshrc` file:
 
@@ -355,7 +357,7 @@ if you don't have it already.
 If you use the [fish](https://fishshell.com/) shell, you can enable experimental shell completion by the following command:
 
 ```fish
-mkdir -p ~/.config/fish/completions and; gopass completion fish > ~/.config/fish/completions/gopass.fish
+mkdir -p ~/.config/fish/completions; and gopass completion fish > ~/.config/fish/completions/gopass.fish
 ```
 
 and start a new shell afterwards.
@@ -375,7 +377,7 @@ gopass ls --flat | dmenu | xargs --no-run-if-empty gopass show -c
 gopass ls --flat | dmenu | xargs --no-run-if-empty gopass show -o | xdotool type --clearmodifiers --file -
 # First pipe the selected name to gopass, and type the value from the key "username" with xdotool.
 gopass ls --flat | dmenu | xargs --no-run-if-empty -- bash -c 'gopass show -f $0 username' | head -n 1 | xdotool type --clearmodifiers --file -
-# Oterwise type the name of the entry using xdotool, in case you are not including a username key in your entries
+# Otherwise type the name of the entry using xdotool, in case you are not including a username key in your entries
 gopass ls --flat | dmenu | sed 's!.*/!!' | tr -d '\n' | xdotool type --clearmodifiers --file -
 ```
 
@@ -385,7 +387,7 @@ You can then bind these command lines to your preferred shortcuts in your window
 
 Gopass allows filling in passwords in browsers leveraging a browser plugin like [gopass bridge](https://github.com/gopasspw/gopassbridge).
 The browser plugin communicates with gopass-jsonapi via JSON messages.
-To allow the plugin to start gopass-jsonapi, a [native messaging manifest](https://developer.mozilla.org/en-US/Add-ons/WebExtensions/Native_messaging) must be installed for each browser.
+To allow the plugin to start gopass-jsonapi, a [native messaging manifest](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging) must be installed for each browser.
 Chrome, Chromium and Firefox are supported, currently.
 
 **Upgrade to gopass v1.10 / v1.11**:
@@ -406,8 +408,8 @@ For more detailed instructions, please read: [gopass-jsonapi/README](https://git
 
 This is the recommended way to use `gopass`.
 
-NOTE: We do recommend to use a private Git repository. A public one will keep
-your credentials secure but it will leak metadata.
+NOTE: We recommend using a private Git repository. A public one will keep
+your credentials secure, but it will leak metadata.
 
 To use `gopass` with `git` either create a new git repository or clone an existing
 password store.
@@ -434,7 +436,7 @@ gopass clone git@gitlab.example.org:john/passwords.git
 ### Storing and Syncing your Password Store with Google Drive / Dropbox / Syncthing / etc
 
 The recommended way to use Gopass is to sync your store with a git repository, preferably a private one, since the name and path of your secrets might reveal information that you'd prefer to keep private.
-However, shall you prefer to, you might also use the `noop` storage backend that is meant to store data on a cloud provider instead of a git server.
+However, shall you prefer to, you might also use the `fs` storage backend that is meant to store data on a cloud provider instead of a git server.
 
 Please be warned that using cloud-based storage may negatively impact the confidentiality of your store. However, if you wish to use one of these services, you can do so.
 
@@ -450,11 +452,11 @@ gopass config mounts.path "~/Google Drive/Password-Store"
 
 Because gopass is fully backwards compatible with pass, you can use some existing graphical user interfaces / frontends:
 
-* Android - [PwdStore](https://github.com/zeapo/Android-Password-Store)
-* iOS - [Pass for iOS](https://github.com/davidjb/pass-ios#readme)
-* Windows / MacOS / Linux -  [QtPass](https://qtpass.org/)
+* Android - [Password Store](https://github.com/agrahn/Android-Password-Store)
+* iOS - [Pass for iOS](https://github.com/mssun/passforios)
+* Windows / macOS / Linux -  [QtPass](https://qtpass.org/)
 
-There is also [Gopass UI](https://github.com/codecentric/gopass-ui) which was exclusively implemented for gopass and is available for MacOS, Linux and Windows.
+There is also [Gopass UI](https://github.com/codecentric/gopass-ui) which was exclusively implemented for gopass and is available for macOS, Linux and Windows.
 
 Others can be found at the "Compatible Clients" section of the [official pass website](https://www.passwordstore.org/).
 
@@ -473,14 +475,17 @@ In order to simplify the setup of gopass for your team members it can be run in 
 
 ```bash
 # First initialize a new shared store and push it to an empty remote
-gopass --yes setup --remote github.com/example/pass.git --alias example --create --name "John Doe" --email "john.doe@example.com"
+gopass --yes setup --remote github.com/example/pass.git --team example --create-team --name "John Doe" --email "john.doe@example.com"
 
 # For every other team member initialize a new store and clone the existing remote
-gopass --yes setup --remote github.com/example/pass.git --alias example --name "Jane Doe" --email "jane.doe@example.com"
+gopass --yes setup --remote github.com/example/pass.git --team example --name "Jane Doe" --email "jane.doe@example.com"
 ```
 
-The first command will create a new mount named `example` and push it to an empty (`--create`) remote.
+The first command will create a new mount named `example` and push it to an empty (`--create-team`) remote.
 It will fail if the remote at `github.com/example/pass.git` is not empty.
 
-The second command will clone the existing (no `--create` flag) remote `github.com/example/pass.git`
+The second command will clone the existing (no `--create-team` flag) remote `github.com/example/pass.git`
 and mount it as the mount point `example`.
+
+N.B. `--team` and `--create-team` used to be named `--alias` and `--create`. The old
+names still work as aliases, but new scripts should prefer the clearer names.

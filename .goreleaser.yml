@@ -1,8 +1,10 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 # goreleaser.yml
 # Release automation
 #
 # Build customization
 project_name: gopass
+version: 2
 
 before:
   hooks:
@@ -37,14 +39,17 @@ builds:
     goarm:
       - 6
       - 7
+    ignore:
+      - goos: windows
+        goarch: arm
     mod_timestamp: '{{ .CommitTimestamp }}'
 archives:
   - id: gopass
     name_template: "{{.Binary}}-{{.Version}}-{{.Os}}-{{.Arch}}{{ if .Arm }}v{{.Arm }}{{ end }}"
-    format: tar.gz
+    formats: ['tar.gz']
     format_overrides:
       - goos: windows
-        format: zip
+        formats: ['zip']
     files:
       - CHANGELOG.md
       - LICENSE
@@ -87,6 +92,19 @@ nfpms:
     recommends:
       - rng-tools
       - bash-completion
+    contents:
+      - src: gopass.1
+        dst: /usr/share/man/man1/gopass.1
+      - src: LICENSE
+        dst: /usr/share/doc/gopass/LICENSE
+      - src: CHANGELOG.md
+        dst: /usr/share/doc/gopass/CHANGELOG.md
+      - src: bash.completion
+        dst: /usr/share/bash-completion/completions/gopass
+      - src: fish.completion
+        dst: /usr/share/fish/vendor_completions.d/gopass.fish
+      - src: zsh.completion
+        dst: /usr/share/zsh/functions/Completion/Linux/_gopass
   - id: gopass_rpm
     vendor: Gopass Authors
     homepage: "https://www.gopass.pw"
@@ -109,6 +127,19 @@ nfpms:
     recommends:
       - rng-tools
       - bash-completion
+    contents:
+      - src: gopass.1
+        dst: /usr/share/man/man1/gopass.1
+      - src: LICENSE
+        dst: /usr/share/doc/gopass/LICENSE
+      - src: CHANGELOG.md
+        dst: /usr/share/doc/gopass/CHANGELOG.md
+      - src: bash.completion
+        dst: /usr/share/bash-completion/completions/gopass
+      - src: fish.completion
+        dst: /usr/share/fish/vendor_completions.d/gopass.fish
+      - src: zsh.completion
+        dst: /usr/share/zsh/functions/Completion/Linux/_gopass
 
 source:
   enabled: true
@@ -128,9 +159,40 @@ milestones:
 
 signs:
   -
-    id: gopass
+    id: gopass-gpg
+    cmd: sh
     artifacts: checksum
-    args: ["--batch", "-u", "{{ .Env.GPG_FINGERPRINT }}", "--armor", "--output", "${signature}", "--detach-sign", "${artifact}"]
+    env:
+      - "ARTIFACT=${artifact}"
+      - "SIGNATURE=${signature}"
+    args:
+      - -ec
+      - |
+        if [ -n "${GPG_FINGERPRINT}" ]; then
+          exec gpg --batch -u "${GPG_FINGERPRINT}" --armor --output "${SIGNATURE}" --detach-sign "${ARTIFACT}"
+        fi
+
+        echo "skipping GPG signing; set GPG_FINGERPRINT to sign locally" >&2
+  -
+    id: gopass-cosign
+    cmd: sh
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    env:
+      - "ARTIFACT=${artifact}"
+      - "SIGNATURE=${signature}"
+    args:
+      - -ec
+      - |
+        if [ "${GITHUB_ACTIONS}" = "true" ]; then
+          exec cosign sign-blob --bundle="${SIGNATURE}" "${ARTIFACT}" --yes
+        fi
+
+        if [ -n "${COSIGN_KEY}" ]; then
+          exec cosign sign-blob --key "${COSIGN_KEY}" --bundle="${SIGNATURE}" "${ARTIFACT}" --yes
+        fi
+
+        echo "skipping cosign signing outside GitHub Actions; set COSIGN_KEY to sign locally" >&2
 
 # creates SBOMs of all archives and the source tarball using syft
 # https://goreleaser.com/customization/sbom

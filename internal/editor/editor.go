@@ -1,3 +1,4 @@
+// Package editor provides a simple wrapper around the EDITOR environment variable.
 package editor
 
 import (
@@ -53,7 +54,7 @@ func Invoke(ctx context.Context, editor string, content []byte) ([]byte, error) 
 		return []byte{}, fmt.Errorf("failed to close tmpfile to start with %s %v: %w", editor, tmpfile.Name(), err)
 	}
 
-	args := make([]string, 0, 4)
+	args := make([]string, 0, 5)
 	if runtime.GOOS != "windows" {
 		cmdArgs, err := shellquote.Split(editor)
 		if err != nil {
@@ -61,6 +62,11 @@ func Invoke(ctx context.Context, editor string, content []byte) ([]byte, error) 
 		}
 
 		editor = cmdArgs[0]
+		// Validate the editor binary actually exists before attempting to run it.
+		if _, err := exec.LookPath(editor); err != nil {
+			return []byte{}, fmt.Errorf("editor binary %q not found in PATH: %w", editor, err)
+		}
+
 		args = append(args, cmdArgs[1:]...)
 		args = append(args, vimOptions(resolveEditor(editor))...)
 	}
@@ -112,10 +118,8 @@ func vimOptions(editor string) []string {
 		viminfo = `shada=""`
 	}
 
-	args := []string{
-		"-c",
-		fmt.Sprintf("autocmd BufNewFile,BufRead %s setlocal noswapfile nobackup noundofile %s", path, viminfo),
-	}
+	args := make([]string, 0, 5)
+	args = append(args, "-c", fmt.Sprintf("autocmd BufNewFile,BufRead %s setlocal noswapfile nobackup noundofile %s", path, viminfo))
 	args = append(args, "-i", "NONE") // disable viminfo
 	args = append(args, "-n")         // disable swap
 

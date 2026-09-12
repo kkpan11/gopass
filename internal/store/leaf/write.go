@@ -3,7 +3,6 @@ package leaf
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/queue"
@@ -15,15 +14,15 @@ import (
 
 // Set encodes and writes the ciphertext of one entry to disk.
 func (s *Store) Set(ctx context.Context, name string, sec gopass.Byter) error {
-	if strings.Contains(name, "//") {
-		return fmt.Errorf("invalid secret name: %s", name)
+	if err := store.ValidateSecretName(name); err != nil {
+		return err
 	}
 
 	if cfg, _ := config.FromContext(ctx); cfg.GetM(s.alias, "core.readonly") == "true" {
-		return fmt.Errorf("writing to %s is disabled by `core.readonly`.", s.alias)
+		return fmt.Errorf("writing to %s is disabled by `core.readonly`", s.alias)
 	}
 
-	p := s.Passfile(name)
+	p := s.passfile(ctx, name)
 
 	recipients, err := s.useableKeys(ctx, name)
 	if err != nil {
@@ -33,9 +32,9 @@ func (s *Store) Set(ctx context.Context, name string, sec gopass.Byter) error {
 	// make sure the encryptor can decrypt later
 	recipients = s.ensureOurKeyID(ctx, recipients)
 
-	// we can not encrypt without recipients
+	// we cannot encrypt without recipients
 	if len(recipients) < 1 {
-		return fmt.Errorf("no useable recipients for %q. can not encrypt without recipients.", name)
+		return fmt.Errorf("no useable recipients for %q. cannot encrypt without recipients", name)
 	}
 
 	ciphertext, err := s.crypto.Encrypt(ctx, sec.Bytes(), recipients)
@@ -68,17 +67,23 @@ func (s *Store) Set(ctx context.Context, name string, sec gopass.Byter) error {
 
 	// try to enqueue this task, if the queue is not available
 	// it will return the task and we will execute it inline
+	commitCtx := ctx
 	t := queue.GetQueue(ctx).Add(func(_ context.Context) (context.Context, error) {
-		return nil, s.gitCommitAndPush(ctx, name)
+		return nil, s.gitCommitAndPush(commitCtx, name)
 	})
 
-	ctx, err = t(ctx)
+	_, err = t(ctx)
 
 	return err
 }
 
 func (s *Store) gitCommitAndPush(ctx context.Context, name string) error {
-	if err := s.storage.TryCommit(ctx, fmt.Sprintf("Save secret to %s: %s", name, ctxutil.GetCommitMessage(ctx))); err != nil {
+	commitMessage := ctxutil.GetCommitMessage(ctx)
+	message := fmt.Sprintf("Save secret %s: %s", name, commitMessage)
+	if commitMessage == "" {
+		message = fmt.Sprintf("Save secret: %s", name)
+	}
+	if err := s.storage.TryCommit(ctx, message); err != nil {
 		return fmt.Errorf("failed to commit changes to git: %w", err)
 	}
 

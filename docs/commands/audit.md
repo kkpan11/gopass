@@ -22,10 +22,21 @@ test_folder/ignore_this
 # Gopass internally uses forward slashes as path separators, even on Windows. So no need to escape backslashes.
 ```
 
+## Exit codes
+
+| Code | Meaning |
+|-----:|---------|
+| 0 | No issues found |
+| 1 | Audit run itself failed |
+| 13 | Store contents could not be listed |
+| 14 | One or more weak passwords or issues detected |
+| 18 | Report file could not be written |
+
+See [docs/exit-codes.md](../exit-codes.md) for the full table.
+
 ## Password strength backends
 
 | Backend                                         | Description                                                            |
 |-------------------------------------------------|------------------------------------------------------------------------|
-| [`zxcvbn`](https://github.com/nbutton23/zxcvbn) | [zxcvbn](https://github.com/dropbox/zxcvbn) password strength checker. |
 | [`crunchy`](https://github.com/muesli/crunchy)  | Crunchy password strength checker                                      |
 | `name`                                          | Checks if password equals the name of the secret                       |

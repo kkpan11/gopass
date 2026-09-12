@@ -28,12 +28,14 @@ var opts struct {
 	logFile    *os.File
 	logSecrets bool
 	verbosity  int
+	pid        int
 }
 
 // v is a verbosity level.
 type v int
 
 // V returns a logger at the given verbosity level.
+// The higher the number, the more verbose the logging.
 func V(n int) v {
 	return v(n)
 }
@@ -67,6 +69,8 @@ func initDebug() bool {
 	if sv := os.Getenv("GOPASS_DEBUG_LOG_SECRETS"); sv != "" && sv != "false" {
 		opts.logSecrets = true
 	}
+
+	opts.pid = os.Getpid()
 
 	initDebugLogger()
 	initDebugTags()
@@ -118,14 +122,15 @@ func parseFilter(envname string, pad func(string) string) map[string]bool {
 		return filter
 	}
 
-	for _, fn := range strings.Split(env, ",") {
+	for fn := range strings.SplitSeq(env, ",") {
 		t := pad(strings.TrimSpace(fn))
 		val := true
 
-		if t[0] == '-' {
+		switch t[0] {
+		case '-':
 			val = false
 			t = t[1:]
-		} else if t[0] == '+' {
+		case '+':
 			val = true
 			t = t[1:]
 		}
@@ -210,12 +215,16 @@ func checkFilter(filter map[string]bool, key string) bool {
 // Log logs a statement to Stderr (unless filtered) and the
 // debug log file (if enabled), but only if the verbosity
 // level is greater or equal to the given level.
+//
+// This is a no-op if the verbosity level is not high enough.
 func (n v) Log(f string, args ...any) {
 	logFn(int(n), 0, f, args...)
 }
 
 // Log logs a statement to Stderr (unless filtered) and the
 // debug log file (if enabled).
+//
+// This is a no-op if debugging is not enabled.
 func Log(f string, args ...any) {
 	logFn(0, 0, f, args...)
 }
@@ -223,6 +232,8 @@ func Log(f string, args ...any) {
 // LogN logs a statement to Stderr (unless filtered) and the
 // debug log file (if enabled). The offset will be applied to
 // the runtime position.
+//
+// This is a no-op if debugging is not enabled.
 func LogN(offset int, f string, args ...any) {
 	logFn(0, offset, f, args...)
 }
@@ -265,7 +276,7 @@ func doLog(verbosity, offset int, f string, args ...any) {
 
 	pos := fmt.Sprintf("%s/%s:%d", dir, file, line)
 
-	formatString := fmt.Sprintf("%s\t%s\t%s", pos, fn, f)
+	formatString := fmt.Sprintf("%d\t%-20s\t%-20s\t%s", opts.pid, pos, fn, f)
 
 	dbgprint := func() {
 		fmt.Fprintf(Stderr, formatString, argsi...)
@@ -288,6 +299,7 @@ func doLog(verbosity, offset int, f string, args ...any) {
 }
 
 // IsEnabled returns true if debug logging was enabled.
+// This is useful to avoid expensive computations if debugging is not enabled.
 func IsEnabled() bool {
 	return enabled
 }

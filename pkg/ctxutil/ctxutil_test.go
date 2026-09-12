@@ -2,13 +2,12 @@ package ctxutil
 
 import (
 	"context"
-	"flag"
 	"testing"
 
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 func TestTerminal(t *testing.T) {
@@ -61,26 +60,13 @@ func TestAlwaysYes(t *testing.T) {
 	assert.False(t, IsAlwaysYes(WithAlwaysYes(ctx, false)))
 }
 
-func TestProgressCallback(t *testing.T) {
-	t.Parallel()
-
-	ctx := config.NewContextInMemory()
-
-	var foo bool
-
-	pc := func() { foo = true }
-
-	GetProgressCallback(WithProgressCallback(ctx, pc))()
-	assert.True(t, foo)
-}
-
 func TestAlias(t *testing.T) {
 	t.Parallel()
 
 	ctx := config.NewContextInMemory()
 
-	assert.Equal(t, "", GetAlias(ctx))
-	assert.Equal(t, "", GetAlias(WithAlias(ctx, "")))
+	assert.Empty(t, GetAlias(ctx))
+	assert.Empty(t, GetAlias(WithAlias(ctx, "")))
 }
 
 func TestGitInit(t *testing.T) {
@@ -108,9 +94,9 @@ func TestCommitMessage(t *testing.T) {
 
 	ctx := config.NewContextInMemory()
 
-	assert.Equal(t, "", GetCommitMessage(ctx))
+	assert.Empty(t, GetCommitMessage(ctx))
 	assert.Equal(t, "foo", GetCommitMessage(WithCommitMessage(ctx, "foo")))
-	assert.Equal(t, "", GetCommitMessage(WithCommitMessage(ctx, "")))
+	assert.Empty(t, GetCommitMessage(WithCommitMessage(ctx, "")))
 }
 
 func TestCommitMessageBody(t *testing.T) {
@@ -123,13 +109,13 @@ func TestCommitMessageBody(t *testing.T) {
 	assert.Equal(t, "foo", GetCommitMessage(ctx2))
 	assert.Equal(t, "bar\nbaz", GetCommitMessageBody(ctx2))
 	ctx2 = AddToCommitMessageBody(AddToCommitMessageBody(ctx, "bar"), "baz")
-	assert.Equal(t, "", GetCommitMessage(ctx2))
+	assert.Empty(t, GetCommitMessage(ctx2))
 	assert.Equal(t, "bar\nbaz", GetCommitMessageFull(ctx2))
 	assert.Equal(t, "bar\nbaz", GetCommitMessageBody(ctx2))
 	ctx2 = WithCommitMessage(ctx, "foo")
 	assert.Equal(t, "foo", GetCommitMessage(ctx2))
 	assert.Equal(t, "foo", GetCommitMessageFull(ctx2))
-	assert.Equal(t, "", GetCommitMessageBody(ctx2))
+	assert.Empty(t, GetCommitMessageBody(ctx2))
 }
 
 func TestComposite(t *testing.T) {
@@ -183,34 +169,25 @@ func TestGlobalFlags(t *testing.T) {
 	t.Parallel()
 
 	ctx := config.NewContextInMemory()
-	app := cli.NewApp()
 
-	fs := flag.NewFlagSet("default", flag.ContinueOnError)
-	sf := cli.BoolFlag{
-		Name:  "yes",
-		Usage: "yes",
-	}
-	require.NoError(t, sf.Apply(fs))
-	require.NoError(t, fs.Parse([]string{"--yes"}))
-	c := cli.NewContext(app, fs, nil)
-	c.Context = ctx
+	var captured context.Context
 
-	assert.True(t, IsAlwaysYes(WithGlobalFlags(c)))
-}
+	cmd := &cli.Command{
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "yes",
+				Usage: "yes",
+			},
+		},
+		Action: func(c context.Context, cmd *cli.Command) error {
+			captured = WithGlobalFlags(c, cmd)
 
-func TestImportFunc(t *testing.T) {
-	t.Parallel()
-
-	ctx := config.NewContextInMemory()
-
-	ifunc := func(context.Context, string, []string) bool {
-		return true
+			return nil
+		},
 	}
 
-	assert.NotNil(t, GetImportFunc(ctx))
-	assert.True(t, GetImportFunc(WithImportFunc(ctx, ifunc))(ctx, "", nil))
-	assert.True(t, HasImportFunc(WithImportFunc(ctx, ifunc)))
-	assert.True(t, GetImportFunc(WithImportFunc(ctx, nil))(ctx, "", nil))
+	require.NoError(t, cmd.Run(ctx, []string{"test", "--yes"}))
+	assert.True(t, IsAlwaysYes(captured))
 }
 
 func TestHidden(t *testing.T) {
@@ -220,4 +197,57 @@ func TestHidden(t *testing.T) {
 
 	assert.False(t, IsHidden(ctx))
 	assert.True(t, IsHidden(WithHidden(ctx, true)))
+}
+
+func TestSetupRemote(t *testing.T) {
+	t.Parallel()
+
+	ctx := config.NewContextInMemory()
+
+	assert.False(t, HasSetupRemote(ctx))
+	assert.True(t, HasSetupRemote(WithSetupRemote(ctx, "https://example.com/repo.git")))
+	assert.False(t, HasSetupRemote(WithSetupRemote(ctx, "")))
+}
+
+func TestPasswordCallback(t *testing.T) {
+	t.Parallel()
+
+	ctx := config.NewContextInMemory()
+
+	_, err := GetPasswordCallback(ctx)("prompt", false)
+	require.ErrorIs(t, err, ErrNoCallback)
+	assert.False(t, HasPasswordCallback(ctx))
+
+	ctx = WithPasswordCallback(ctx, func(prompt string, confirm bool) ([]byte, error) {
+		assert.Equal(t, "prompt", prompt)
+		assert.True(t, confirm)
+
+		return []byte("secret"), nil
+	})
+
+	pw, err := GetPasswordCallback(ctx)("prompt", true)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("secret"), pw)
+	assert.True(t, HasPasswordCallback(ctx))
+}
+
+func TestPasswordPurgeCallback(t *testing.T) {
+	t.Parallel()
+
+	ctx := config.NewContextInMemory()
+
+	assert.False(t, HasPasswordPurgeCallback(ctx))
+	assert.NotPanics(t, func() {
+		GetPasswordPurgeCallback(ctx)("prompt")
+	})
+
+	var purged bool
+	ctx = WithPasswordPurgeCallback(ctx, func(prompt string) {
+		assert.Equal(t, "prompt", prompt)
+		purged = true
+	})
+
+	GetPasswordPurgeCallback(ctx)("prompt")
+	assert.True(t, purged)
+	assert.True(t, HasPasswordPurgeCallback(ctx))
 }

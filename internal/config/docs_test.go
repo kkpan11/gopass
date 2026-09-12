@@ -9,41 +9,50 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gopasspw/gopass/internal/set"
-	"golang.org/x/exp/maps"
+	"github.com/gopasspw/gopass/pkg/set"
 )
 
 // ignoredEnvs is a list of environment variables that are used by gopass
 // but originate from elsewhere. They should be well known and properly
 // documented already.
 var ignoredEnvs = set.Map([]string{
+	// keep-sorted start
 	"APPDATA",
+	"DEBEMAIL",
+	"DEBFULLNAME",
+	"EMAIL",
 	"GIT_AUTHOR_EMAIL",
 	"GIT_AUTHOR_NAME",
 	"GNUPGHOME",
-	"GOPATH",
 	"GOPASS_CONFIG_NOSYSTEM", // name assembled, tests can't catch it
 	"GOPASS_DEBUG_FILES",     // indirect usage
 	"GOPASS_DEBUG_FUNCS",     // indirect usage
 	"GOPASS_GPG_OPTS",        // indirect usage
 	"GOPASS_UMASK",           // indirect usage
-	"PASSWORD_STORE_UMASK",   // indirect usage
+	"GOPATH",
 	"GPG_TTY",
 	"HOME",
 	"LOCALAPPDATA",
+	"PASSWORD_STORE_UMASK", // indirect usage
+	"USER",
 	"XDG_CACHE_HOME",
 	"XDG_CONFIG_HOME",
 	"XDG_DATA_HOME",
+	"XDG_RUNTIME_DIR",
+	// keep-sorted end
 })
 
 // ignoredOptions is a list of config options that are used by gopass
 // but may not be covered easily by a regexp.
 var ignoredOptions = set.Map([]string{
-	"core.pre-hook",
+	// keep-sorted start
 	"core.post-hook",
+	"core.pre-hook",
+	"include.path",
 	"recipients.hash",
 	"user.email",
 	"user.name",
+	// keep-sorted end
 })
 
 func TestConfigOptsInDocs(t *testing.T) {
@@ -76,7 +85,7 @@ func TestConfigOptsInDocs(t *testing.T) {
 func usedOpts(t *testing.T) map[string]bool {
 	t.Helper()
 
-	optRE := regexp.MustCompile(`(?:\.Get(?:|Int|Bool|All|Global)\(\"([a-z]+\.[a-z-]+)\"\)|\.Get(?:|Int|Bool)M\([^,]+, \"([a-z]+\.[a-z-]+)\"\)|config\.(?:Bool|Int|String)\((?:ctx|c\.Context), \"([a-z]+\.[a-z-]+)\"\)|hook\.Invoke(?:Root)?\(ctx, \"([a-z]+\.[a-z-]+)\")`)
+	optRE := regexp.MustCompile(`(?:\.Get(?:|Int|Bool|All|Global)\(\"([a-z]+\.[a-z-]+)\"\)|\.Get(?:|Int|Bool)M\([^,]+, \"([a-z]+\.[a-z-]+)\"\)|config\.(?:Bool|Int|String|Strings)\((?:ctx|c\.Context), \"([a-z]+\.[a-z-]+)\"\)|hook\.Invoke(?:Root)?\(ctx, \"([a-z]+\.[a-z-]+)\")`)
 	opts := make(map[string]bool, 42)
 
 	dir := filepath.Join("..", "..")
@@ -141,6 +150,10 @@ func usedOptsInFile(t *testing.T, fn string, opts map[string]bool, re *regexp.Re
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -186,12 +199,12 @@ func TestEnvVarsInDocs(t *testing.T) {
 	t.Logf("env options documented in doc: %+v", documented)
 	t.Logf("env options used in the code: %+v", used)
 
-	for _, k := range set.Sorted(maps.Keys(documented)) {
+	for _, k := range set.SortedKeys(documented) {
 		if !used[k] {
 			t.Errorf("Documented but not used: %s", k)
 		}
 	}
-	for _, k := range set.Sorted(maps.Keys(used)) {
+	for _, k := range set.SortedKeys(used) {
 		if !documented[k] {
 			t.Errorf("Used but not documented: %s", k)
 		}
@@ -265,6 +278,10 @@ func usedEnvsInFile(t *testing.T, fn string, opts map[string]bool, re *regexp.Re
 		opts[v] = true
 	}
 
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -300,6 +317,10 @@ func documentedEnvs(t *testing.T) map[string]bool {
 		}
 
 		opts[v] = true
+	}
+
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("failed to scan %s: %s", fn, err)
 	}
 
 	return opts

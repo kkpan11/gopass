@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gopasspw/gopass/pkg/fsutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,14 +16,19 @@ func TestBaseConfig(t *testing.T) {
 	out, err := ts.run("config")
 	require.NoError(t, err)
 
-	wanted := `core.autopush = true
+	wanted := `age.agent-enabled = false
+age.agent-timeout = 0
+core.autopush = true
 core.autosync = true
+core.casefold = false
 core.cliptimeout = 45
 core.exportkeys = false
+core.follow-references = false
 core.notifications = true
 `
 	wanted += "mounts.path = " + ts.storeDir("root") + "\n" +
-		"pwgen.xkcd-lang = en"
+		`pwgen.xkcd-lang = en
+show.fuzzysearch = true`
 
 	assert.Equal(t, wanted, out)
 
@@ -67,16 +73,21 @@ func TestMountConfig(t *testing.T) {
 	_, err = ts.run("config")
 	require.NoError(t, err)
 
-	wanted := `core.autopush = true
+	wanted := `age.agent-enabled = false
+age.agent-timeout = 0
+core.autopush = true
 core.autosync = true
+core.casefold = false
 core.cliptimeout = 45
 core.exportkeys = false
+core.follow-references = false
 core.notifications = true
 `
-	wanted += "mounts.mnt/m1.path = " + ts.storeDir("m1") + "\n"
+	wanted += "mounts.mnt/m1.path = " + fsutil.ShrinkPath(ts.storeDir("m1")) + "\n"
 	wanted += "mounts.path = " + ts.storeDir("root") + "\n"
 	wanted += "pwgen.xkcd-lang = en\n"
 	wanted += "recipients.mnt/m1.hash = 9a4c4b1e0eb9ade2e692ff948f43d9668145eca3df88ffff67e0e21426252907\n"
+	wanted += "show.fuzzysearch = true\n"
 
 	out, err := ts.run("config")
 	require.NoError(t, err)

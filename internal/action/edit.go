@@ -18,13 +18,16 @@ import (
 	"github.com/gopasspw/gopass/pkg/gopass/secrets"
 	"github.com/gopasspw/gopass/pkg/pwgen"
 	"github.com/gopasspw/gopass/pkg/termio"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // Edit the content of a password file.
-func (s *Action) Edit(c *cli.Context) error {
-	ctx := ctxutil.WithGlobalFlags(c)
-	name := c.Args().First()
+func (s *secretHandler) Edit(ctx context.Context, cmd *cli.Command) error {
+	ctx = ctxutil.WithGlobalFlags(ctx, cmd)
+	ctx = ctxutil.WithFollowRef(ctx, false)
+	ctx = ctxutil.WithForce(ctx, cmd.Bool("force"))
+
+	name := cmd.Args().First()
 	if name == "" {
 		return exit.Error(exit.Usage, nil, "Usage: %s edit secret", s.Name)
 	}
@@ -33,22 +36,18 @@ func (s *Action) Edit(c *cli.Context) error {
 		return exit.Error(exit.Hook, err, "edit.pre-hook failed: %s", err)
 	}
 
-	if err := s.Store.CheckRecipients(ctx, name); err != nil {
-		return exit.Error(exit.Recipients, err, "Invalid recipients detected: %s", err)
-	}
-
-	if err := s.edit(ctx, c, name); err != nil {
-		return err
+	if err := s.edit(ctx, cmd, name); err != nil {
+		return exit.Error(exit.Unknown, err, "failed to edit %q: %s", name, err)
 	}
 
 	return hook.InvokeRoot(ctx, "edit.post-hook", name, s.Store)
 }
 
-func (s *Action) edit(ctx context.Context, c *cli.Context, name string) error {
-	ed := editor.Path(c)
+func (s *secretHandler) edit(ctx context.Context, cmd *cli.Command, name string) error {
+	ed := editor.Path(ctx, cmd)
 
 	// get existing content or generate new one from a template.
-	name, content, changed, err := s.editGetContent(ctx, name, c.Bool("create"))
+	name, content, changed, err := s.editGetContent(ctx, name, cmd.Bool("create"))
 	if err != nil {
 		return err
 	}
@@ -59,10 +58,20 @@ func (s *Action) edit(ctx context.Context, c *cli.Context, name string) error {
 		return exit.Error(exit.Unknown, err, "failed to invoke editor: %s", err)
 	}
 
+	// Check for custom commit message
+	commitMsg := fmt.Sprintf("Edit with %s", ed)
+	if cmd.IsSet("commit-message") {
+		commitMsg = cmd.String("commit-message")
+	}
+	if cmd.Bool("interactive-commit") {
+		commitMsg = ""
+	}
+	ctx = ctxutil.WithCommitMessage(ctx, commitMsg)
+
 	return s.editUpdate(ctx, name, content, newContent, changed, ed)
 }
 
-func (s *Action) editUpdate(ctx context.Context, name string, content, nContent []byte, changed bool, ed string) error {
+func (s *secretHandler) editUpdate(ctx context.Context, name string, content, nContent []byte, changed bool, ed string) error {
 	// If content is equal, nothing changed, exiting.
 	if bytes.Equal(content, nContent) && !changed {
 		return nil
@@ -76,7 +85,7 @@ func (s *Action) editUpdate(ctx context.Context, name string, content, nContent 
 	}
 
 	// write result (back) to store.
-	if err := s.Store.Set(ctxutil.WithCommitMessage(ctx, fmt.Sprintf("Edited with %s", ed)), name, nSec); err != nil {
+	if err := s.Store.Set(ctx, name, nSec); err != nil {
 		if !errors.Is(err, store.ErrMeaninglessWrite) {
 			return exit.Error(exit.Encrypt, err, "failed to encrypt secret %s: %s", name, err)
 		}
@@ -86,13 +95,17 @@ func (s *Action) editUpdate(ctx context.Context, name string, content, nContent 
 	return nil
 }
 
-func (s *Action) editGetContent(ctx context.Context, name string, create bool) (string, []byte, bool, error) {
+func (s *secretHandler) editGetContent(ctx context.Context, name string, create bool) (string, []byte, bool, error) {
 	if !s.Store.Exists(ctx, name) && !create && !config.Bool(ctx, "edit.auto-create") {
 		var err error
 		name, err = s.editFindName(ctx, name)
 		if err != nil {
 			return "", nil, false, err
 		}
+	}
+
+	if err := s.Store.CheckRecipients(ctx, name); err != nil {
+		return name, nil, false, exit.Error(exit.Recipients, err, "invalid recipients detected for %q: %s", name, err)
 	}
 
 	// edit existing entry.
@@ -112,7 +125,7 @@ func (s *Action) editGetContent(ctx context.Context, name string, create bool) (
 
 	// load template if it exists.
 	pwLength, _ := config.DefaultPasswordLengthFromEnv(ctx)
-	if content, found := s.renderTemplate(ctx, name, []byte(pwgen.GeneratePassword(pwLength, false))); found {
+	if content, found := s.renderTemplateFn(ctx, name, []byte(pwgen.GeneratePassword(pwLength, false))); found {
 		return name, content, true, nil
 	}
 
@@ -120,15 +133,15 @@ func (s *Action) editGetContent(ctx context.Context, name string, create bool) (
 	return name, nil, false, nil
 }
 
-func (s *Action) editFindName(ctx context.Context, name string) (string, error) {
+func (s *secretHandler) editFindName(ctx context.Context, name string) (string, error) {
 	newName := ""
 	// capture only the name of the selected secret.
-	cb := func(ctx context.Context, c *cli.Context, selectedName string, recurse bool) error {
+	cb := func(ctx context.Context, cmd *cli.Command, selectedName string, recurse bool) error {
 		newName = selectedName
 
 		return nil
 	}
-	if err := s.find(ctx, nil, name, cb, false); err != nil {
+	if err := s.findFn(ctx, nil, name, cb, false); err != nil {
 		debug.Log("failed to find secret %s: %s", name, err)
 
 		return name, err

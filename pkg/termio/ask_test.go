@@ -166,14 +166,15 @@ func TestAskForConfirmation(t *testing.T) {
 	assert.True(t, AskForConfirmation(ctx, "test"))
 
 	// provide value on redirected stdin
-	input := `y
+	var input strings.Builder
+	input.WriteString(`y
 n
-`
+`)
 	for range maxTries + 1 {
-		input += "z\n"
+		input.WriteString("z\n")
 	}
 
-	Stdin = strings.NewReader(input)
+	Stdin = strings.NewReader(input.String())
 	ctx = ctxutil.WithAlwaysYes(ctx, false)
 
 	assert.True(t, AskForConfirmation(ctx, "test"))
@@ -248,7 +249,7 @@ foobat
 
 	sv, err = AskForPassword(ctx, "test", true)
 	require.NoError(t, err)
-	assert.Equal(t, "", sv)
+	assert.Empty(t, sv)
 }
 
 func TestAskForPasswordInteractive(t *testing.T) {

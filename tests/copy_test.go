@@ -22,19 +22,19 @@ func TestCopy(t *testing.T) {
 	t.Run("copy usage", func(t *testing.T) {
 		out, err := ts.run("copy")
 		require.Error(t, err)
-		assert.Equal(t, "\nError: Usage: "+filepath.Base(ts.Binary)+" cp <FROM> <TO>\n", out)
+		assert.Equal(t, "Usage: "+filepath.Base(ts.Binary)+" cp <FROM> <TO>\n", out)
 	})
 
 	t.Run("copy w/o destination", func(t *testing.T) {
 		out, err := ts.run("copy foo")
 		require.Error(t, err)
-		assert.Equal(t, "\nError: Usage: "+filepath.Base(ts.Binary)+" cp <FROM> <TO>\n", out)
+		assert.Equal(t, "Usage: "+filepath.Base(ts.Binary)+" cp <FROM> <TO>\n", out)
 	})
 
 	t.Run("copy non existing source", func(t *testing.T) {
 		out, err := ts.run("copy foo bar")
 		require.Error(t, err)
-		assert.Equal(t, "\nError: foo does not exist\n", out)
+		assert.Equal(t, "foo does not exist\n", out)
 	})
 
 	ts.initSecrets("")
@@ -47,12 +47,12 @@ func TestCopy(t *testing.T) {
 	t.Run("copy existing secret to non-existing destination", func(t *testing.T) {
 		out, err := ts.run("copy foo/bar foo/baz")
 		require.NoError(t, err)
-		assert.Equal(t, "", out)
+		assert.Empty(t, out)
 
-		orig, err := ts.run("show -f foo/bar")
+		orig, err := ts.run("show -u foo/bar")
 		require.NoError(t, err)
 
-		cp, err := ts.run("show -f foo/baz")
+		cp, err := ts.run("show -u foo/baz")
 		require.NoError(t, err)
 
 		assert.Equal(t, orig, cp)

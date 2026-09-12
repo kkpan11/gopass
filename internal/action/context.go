@@ -13,7 +13,24 @@ const (
 	ctxKeyOnlyClip
 	ctxKeyAlsoClip
 	ctxKeyPrintChars
+	ctxKeyWithQRBody
+	ctxKeyClipLine
 )
+
+// WithClipLine returns a context with the clip line number set.
+func WithClipLine(ctx context.Context, line int) context.Context {
+	return context.WithValue(ctx, ctxKeyClipLine, line)
+}
+
+// GetClipLine returns the clip line number or -1 if not set.
+func GetClipLine(ctx context.Context) int {
+	iv, ok := ctx.Value(ctxKeyClipLine).(int)
+	if !ok {
+		return -1
+	}
+
+	return iv
+}
 
 // WithClip returns a context with the value for clip (for copy to clipboard)
 // set.
@@ -37,7 +54,7 @@ func WithAlsoClip(ctx context.Context, clip bool) context.Context {
 	return context.WithValue(ctx, ctxKeyAlsoClip, clip)
 }
 
-// IsAlsoClip returns the value for alsoclip of the dfeault (false).
+// IsAlsoClip returns the value for alsoclip or the default (false).
 func IsAlsoClip(ctx context.Context) bool {
 	bv, ok := ctx.Value(ctxKeyAlsoClip).(bool)
 	if !ok {
@@ -150,4 +167,19 @@ func GetPrintChars(ctx context.Context) []int {
 	}
 
 	return mv
+}
+
+// WithQRBody returns the context with the value of with QR body set.
+func WithQRBody(ctx context.Context, qr bool) context.Context {
+	return context.WithValue(ctx, ctxKeyWithQRBody, qr)
+}
+
+// IsQRBody returns the value of with QR body or the default (false).
+func IsQRBody(ctx context.Context) bool {
+	bv, ok := ctx.Value(ctxKeyWithQRBody).(bool)
+	if !ok {
+		return false
+	}
+
+	return bv
 }

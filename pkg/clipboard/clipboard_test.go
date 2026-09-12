@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/atotto/clipboard"
+	"github.com/gopasspw/clipboard"
 	"github.com/gopasspw/gopass/internal/config"
 	"github.com/gopasspw/gopass/internal/out"
 	"github.com/mitchellh/go-ps"
@@ -36,7 +36,7 @@ func TestUnsupportedCopyToClipboard(t *testing.T) {
 	ctx, cancel := context.WithCancel(config.NewContextInMemory())
 	defer cancel()
 
-	clipboard.Unsupported = true
+	clipboard.ForceUnsupported = true
 
 	buf := &bytes.Buffer{}
 	out.Stderr = buf
@@ -47,13 +47,13 @@ func TestUnsupportedCopyToClipboard(t *testing.T) {
 
 func TestClearClipboard(t *testing.T) {
 	ctx, cancel := context.WithCancel(config.NewContextInMemory())
-	require.NoError(t, clear(ctx, "foo", []byte("bar"), 0))
+	require.NoError(t, clearClip(ctx, "foo", []byte("bar"), 0))
 	cancel()
 	time.Sleep(50 * time.Millisecond)
 }
 
 func BenchmarkWalkProc(b *testing.B) {
-	for i := 0; i < b.N; i++ { //nolint:intrange // b.N is evaluated at each iteration.
+	for b.Loop() {
 		_ = filepath.Walk("/proc", func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return nil
@@ -76,7 +76,7 @@ func BenchmarkWalkProc(b *testing.B) {
 }
 
 func BenchmarkListProc(b *testing.B) {
-	for i := 0; i < b.N; i++ { //nolint:intrange // b.N is evaluated at each iteration.
+	for b.Loop() {
 		procs, err := ps.Processes()
 		if err != nil {
 			b.Fatalf("err: %s", err)

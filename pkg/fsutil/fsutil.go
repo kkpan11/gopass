@@ -1,16 +1,17 @@
+// Package fsutil provides some common file system utilities
+// for gopass. It is used to handle file paths, directories, and files.
 package fsutil
 
 import (
 	"bufio"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/gopasspw/gopass/pkg/appdir"
 	"github.com/gopasspw/gopass/pkg/debug"
@@ -18,8 +19,8 @@ import (
 
 var reCleanFilename = regexp.MustCompile(`[^\w\d@.-]`)
 
-// CleanFilename strips all possibly suspicious characters from a filename
-// WARNING: NOT suiteable for pathnames as slashes will be stripped as well!
+// CleanFilename strips all possibly suspicious characters from a filename.
+// WARNING: NOT suitable for pathnames as slashes will be stripped as well!
 func CleanFilename(in string) string {
 	return strings.Trim(reCleanFilename.ReplaceAllString(in, "_"), "_ ")
 }
@@ -39,13 +40,18 @@ func ExpandHomedir(path string) string {
 }
 
 // CleanPath resolves common aliases in a path and cleans it as much as possible.
+// It expands the tilde to the user's home directory and resolves relative paths.
 func CleanPath(path string) string {
-	// Only replace ~ if GOPASS_HOMEDIR is set. In that case we do expect any reference
-	// to the users homedir to be replaced by the value of GOPASS_HOMEDIR. This is mainly
-	// for testing and experiments. In all other cases we do want to leave ~ as-is.
+	// Replace ~ with GOPASS_HOMEDIR if set (mainly for testing and experiments),
+	// otherwise replace ~ with user's homedir if set. We expect any reference
+	// to the user's homedir to be replaced with one of these two values.
 	if len(path) > 1 && path[:2] == "~/" {
 		if hd := os.Getenv("GOPASS_HOMEDIR"); hd != "" {
-			return filepath.Clean(hd + path[2:])
+			return filepath.Clean(hd + path[1:])
+		}
+
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Clean(home + path[1:])
 		}
 	}
 
@@ -56,8 +62,29 @@ func CleanPath(path string) string {
 	return filepath.Clean(path)
 }
 
+// ShrinkPath replaces the leading home directory in path with a tilde (~).
+// If GOPASS_HOMEDIR is set it is used as the home directory reference; otherwise
+// os.UserHomeDir is consulted. This makes paths portable across machines when
+// stored in config files that are shared/synced across platforms.
+func ShrinkPath(path string) string {
+	if hd := os.Getenv("GOPASS_HOMEDIR"); hd != "" {
+		if rel, err := filepath.Rel(hd, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return "~/" + filepath.ToSlash(rel)
+		}
+
+		return path
+	}
+
+	if home, err := os.UserHomeDir(); err == nil {
+		if rel, err := filepath.Rel(home, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return "~/" + filepath.ToSlash(rel)
+		}
+	}
+
+	return path
+}
+
 // IsDir checks if a certain path exists and is a directory.
-// https://stackoverflow.com/questions/10510691/how-to-check-whether-a-file-or-directory-denoted-by-a-path-exists-in-golang
 func IsDir(path string) bool {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -136,10 +163,9 @@ func IsEmptyDir(path string) (bool, error) {
 	return empty, nil
 }
 
-// Shred overwrite the given file any number of times.
+// Shred overwrites the given file with random data and deletes it.
+// The file is overwritten `runs` times. The last run is with zeros.
 func Shred(path string, runs int) error {
-	rand.Seed(time.Now().UnixNano())
-
 	fh, err := os.OpenFile(path, os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to open file %q: %w", path, err)
@@ -179,12 +205,7 @@ func Shred(path string, runs int) error {
 
 		var written int64
 
-		for {
-			// end of file
-			if written >= flen {
-				break
-			}
-
+		for written < flen {
 			buf := bufFn()
 
 			n, err := fh.Write(buf[0:min(flen-written, int64(len(buf)))])
@@ -240,14 +261,6 @@ func FileContains(path, needle string) bool {
 	return false
 }
 
-func min(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-
-	return b
-}
-
 // CopyFile copies a file from src to dst. Permissions will be preserved. It is expected to
 // fail if the destination does exist but is not writeable.
 func CopyFile(from, to string) error {
@@ -288,7 +301,7 @@ func CopyFile(from, to string) error {
 }
 
 // CopyFileForce copies a file from src to dst. Permissions will be preserved. The destination
-// if removed before copying to avoid permission issues.
+// is removed before copying to avoid permission issues.
 func CopyFileForce(from, to string) error {
 	if IsFile(to) {
 		if err := os.Remove(to); err != nil {

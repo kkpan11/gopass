@@ -39,7 +39,7 @@ func (s *Store) Copy(ctx context.Context, from, to string) error {
 		return fmt.Errorf("failed to get %q from store: %w", from, err)
 	}
 
-	if err := s.Set(ctxutil.WithCommitMessage(ctx, fmt.Sprintf("Copied from %s to %s", from, to)), to, content); err != nil {
+	if err := s.Set(ctxutil.WithCommitMessage(ctx, fmt.Sprintf("Copy from %s to %s", from, to)), to, content); err != nil {
 		if !errors.Is(err, store.ErrMeaninglessWrite) {
 			return fmt.Errorf("failed to save secret %q to store: %w", to, err)
 		}
@@ -90,9 +90,18 @@ func (s *Store) Move(ctx context.Context, from, to string) error {
 }
 
 func (s *Store) directMove(ctx context.Context, from, to string, del bool) error {
-	ctx = ctxutil.WithCommitMessage(ctx, fmt.Sprintf("Move from %s to %s", from, to))
-	pFrom := s.Passfile(from)
-	pTo := s.Passfile(to)
+	pFrom := s.passfile(ctx, from)
+	pTo := s.passfile(ctx, to)
+
+	// if original destination has trailing slash,
+	// it means we should create folder and move/copy source file in it
+	if strings.HasSuffix(to, "/") {
+		// Check if the destination already exists as a file
+		if s.storage.Exists(ctx, to) && !s.storage.IsDir(ctx, to) {
+			return fmt.Errorf("destination %q already exists as a file", to)
+		}
+		pTo = filepath.Join(to, filepath.Base(pFrom))
+	}
 
 	debug.Log("directMove %s (%q) -> %s (%q)", from, to, pFrom, pTo)
 
@@ -141,7 +150,7 @@ func (s *Store) Prune(ctx context.Context, tree string) error {
 // delete will either delete one file or an directory tree depending on the
 // recurse flag.
 func (s *Store) delete(ctx context.Context, name string, recurse bool) error {
-	path := s.Passfile(name)
+	path := s.passfile(ctx, name)
 
 	if recurse {
 		if err := s.deleteRecurse(ctx, name, path); err != nil {
@@ -160,7 +169,12 @@ func (s *Store) delete(ctx context.Context, name string, recurse bool) error {
 		return nil
 	}
 
-	if err := s.storage.TryCommit(ctx, fmt.Sprintf("Remove %s from store.", name)); err != nil {
+	commitMsg := ctxutil.GetCommitMessage(ctx)
+	if commitMsg == "" {
+		commitMsg = fmt.Sprintf("Remove %s from store.", name)
+	}
+
+	if err := s.storage.TryCommit(ctx, commitMsg); err != nil {
 		return fmt.Errorf("failed to commit changes to git: %w", err)
 	}
 
